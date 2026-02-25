@@ -53,11 +53,11 @@ async function tryFindVolumeByName(name: string): Promise<string | null> {
 
 async function tryFindTemplateByName(name: string): Promise<string | null> {
   const data = await runpodGraphql<{
-    myself?: { templates?: Array<{ id: string; name: string }> };
+    myself?: { podTemplates?: Array<{ id: string; name: string }> };
   }>(
     `query ListTemplates {
       myself {
-        templates {
+        podTemplates {
           id
           name
         }
@@ -65,7 +65,7 @@ async function tryFindTemplateByName(name: string): Promise<string | null> {
     }`
   );
 
-  const match = data.myself?.templates?.find((template) => template.name === name);
+  const match = data.myself?.podTemplates?.find((template) => template.name === name);
   return match?.id ?? null;
 }
 
