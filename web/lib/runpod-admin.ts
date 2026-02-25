@@ -105,15 +105,17 @@ export async function ensureVolume(params: {
   const data = await runpodGraphql<{
     createNetworkVolume: { id: string };
   }>(
-    `mutation CreateNetworkVolume($name: String!, $size: Int!, $dataCenterId: String!) {
-      createNetworkVolume(name: $name, size: $size, dataCenterId: $dataCenterId) {
+    `mutation CreateNetworkVolume($input: CreateNetworkVolumeInput!) {
+      createNetworkVolume(input: $input) {
         id
       }
     }`,
     {
-      name: params.name,
-      size: params.sizeGb,
-      dataCenterId: params.datacenterId
+      input: {
+        name: params.name,
+        size: params.sizeGb,
+        dataCenterId: params.datacenterId
+      }
     }
   );
 
@@ -141,37 +143,23 @@ export async function ensureTemplate(params: {
   const data = await runpodGraphql<{
     createTemplate: { id: string };
   }>(
-    `mutation CreateTemplate(
-      $name: String!,
-      $imageName: String!,
-      $volumeInGb: Int!,
-      $volumeMountPath: String!,
-      $env: [EnvInput!],
-      $registryUsername: String,
-      $registryPassword: String
-    ) {
-      createTemplate(
-        name: $name,
-        imageName: $imageName,
-        containerDiskInGb: 20,
-        volumeInGb: $volumeInGb,
-        volumeMountPath: $volumeMountPath,
-        env: $env,
-        isServerless: true,
-        registryAuthUsername: $registryUsername,
-        registryAuthPassword: $registryPassword
-      ) {
+    `mutation CreateTemplate($input: CreateTemplateInput!) {
+      createTemplate(input: $input) {
         id
       }
     }`,
     {
-      name: params.name,
-      imageName: params.dockerImage,
-      volumeInGb: params.volumeGb,
-      volumeMountPath: params.volumeMountPath,
-      env: params.env,
-      registryUsername: params.registryAuth?.username,
-      registryPassword: params.registryAuth?.password
+      input: {
+        name: params.name,
+        imageName: params.dockerImage,
+        containerDiskInGb: 20,
+        volumeInGb: params.volumeGb,
+        volumeMountPath: params.volumeMountPath,
+        env: params.env,
+        isServerless: true,
+        registryAuthUsername: params.registryAuth?.username,
+        registryAuthPassword: params.registryAuth?.password
+      }
     }
   );
 
@@ -201,40 +189,24 @@ export async function ensureEndpoint(params: {
   const data = await runpodGraphql<{
     createEndpoint: { id: string };
   }>(
-    `mutation CreateEndpoint(
-      $name: String!,
-      $templateId: String!,
-      $gpuIds: String!,
-      $networkVolumeId: String!,
-      $workersMin: Int!,
-      $workersMax: Int!,
-      $idleTimeout: Int!,
-      $executionTimeout: Int!
-    ) {
-      createEndpoint(
-        name: $name,
-        templateId: $templateId,
-        gpuIds: $gpuIds,
-        networkVolumeId: $networkVolumeId,
-        workersMin: $workersMin,
-        workersMax: $workersMax,
-        idleTimeout: $idleTimeout,
-        scalerType: "QUEUE_DELAY",
-        scalerValue: 4,
-        executionTimeout: $executionTimeout
-      ) {
+    `mutation CreateEndpoint($input: CreateEndpointInput!) {
+      createEndpoint(input: $input) {
         id
       }
     }`,
     {
-      name: params.name,
-      templateId: params.templateId,
-      gpuIds: params.gpuType,
-      networkVolumeId: params.volumeId,
-      workersMin: params.workersMin,
-      workersMax: params.workersMax,
-      idleTimeout: params.idleTimeout,
-      executionTimeout: params.executionTimeoutMs
+      input: {
+        name: params.name,
+        templateId: params.templateId,
+        gpuIds: params.gpuType,
+        networkVolumeId: params.volumeId,
+        workersMin: params.workersMin,
+        workersMax: params.workersMax,
+        idleTimeout: params.idleTimeout,
+        scalerType: "QUEUE_DELAY",
+        scalerValue: 4,
+        executionTimeout: params.executionTimeoutMs
+      }
     }
   );
 
