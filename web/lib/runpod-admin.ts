@@ -31,7 +31,10 @@ function isSchemaCompatibilityError(error: unknown): boolean {
     text.includes("unknown type") ||
     text.includes("cannot query field") ||
     text.includes("unknown argument") ||
-    text.includes("did you mean")
+    text.includes("did you mean") ||
+    text.includes("is not defined by type") ||
+    text.includes("used in position expecting type") ||
+    text.includes("of required type")
   );
 }
 
@@ -480,7 +483,7 @@ export async function ensureEndpoint(params: {
     return discovered;
   }
 
-  const endpointPayload = {
+  const endpointPayloadBase = {
     name: params.name,
     templateId: params.templateId,
     networkVolumeId: params.volumeId,
@@ -488,8 +491,7 @@ export async function ensureEndpoint(params: {
     workersMax: params.workersMax,
     idleTimeout: params.idleTimeout,
     scalerType: "QUEUE_DELAY",
-    scalerValue: 4,
-    executionTimeout: params.executionTimeoutMs
+    scalerValue: 4
   };
 
   return runWithSchemaFallback<string>([
@@ -504,8 +506,9 @@ export async function ensureEndpoint(params: {
         }`,
         {
           input: {
-            ...endpointPayload,
-            gpuIds: params.gpuType
+            ...endpointPayloadBase,
+            gpuIds: params.gpuType,
+            executionTimeoutMs: params.executionTimeoutMs
           }
         }
       );
@@ -522,8 +525,47 @@ export async function ensureEndpoint(params: {
         }`,
         {
           input: {
-            ...endpointPayload,
-            gpuIds: [params.gpuType]
+            ...endpointPayloadBase,
+            gpuIds: params.gpuType,
+            executionTimeout: params.executionTimeoutMs
+          }
+        }
+      );
+      return data.createEndpoint.id;
+    },
+    async () => {
+      const data = await runpodGraphql<{
+        createEndpoint: { id: string };
+      }>(
+        `mutation CreateEndpoint($input: CreateEndpointInput!) {
+          createEndpoint(input: $input) {
+            id
+          }
+        }`,
+        {
+          input: {
+            ...endpointPayloadBase,
+            gpuIds: [params.gpuType],
+            executionTimeoutMs: params.executionTimeoutMs
+          }
+        }
+      );
+      return data.createEndpoint.id;
+    },
+    async () => {
+      const data = await runpodGraphql<{
+        createEndpoint: { id: string };
+      }>(
+        `mutation CreateEndpoint($input: CreateEndpointInput!) {
+          createEndpoint(input: $input) {
+            id
+          }
+        }`,
+        {
+          input: {
+            ...endpointPayloadBase,
+            gpuIds: [params.gpuType],
+            executionTimeout: params.executionTimeoutMs
           }
         }
       );
@@ -541,7 +583,7 @@ export async function ensureEndpoint(params: {
           $workersMin: Int!,
           $workersMax: Int!,
           $idleTimeout: Int!,
-          $executionTimeout: Int!
+          $executionTimeoutMs: Int!
         ) {
           createEndpoint(
             name: $name,
@@ -553,7 +595,7 @@ export async function ensureEndpoint(params: {
             idleTimeout: $idleTimeout,
             scalerType: "QUEUE_DELAY",
             scalerValue: 4,
-            executionTimeout: $executionTimeout
+            executionTimeoutMs: $executionTimeoutMs
           ) {
             id
           }
@@ -566,7 +608,7 @@ export async function ensureEndpoint(params: {
           workersMin: params.workersMin,
           workersMax: params.workersMax,
           idleTimeout: params.idleTimeout,
-          executionTimeout: params.executionTimeoutMs
+          executionTimeoutMs: params.executionTimeoutMs
         }
       );
       return data.createEndpoint.id;
@@ -583,7 +625,7 @@ export async function ensureEndpoint(params: {
           $workersMin: Int!,
           $workersMax: Int!,
           $idleTimeout: Int!,
-          $executionTimeout: Int!
+          $executionTimeoutMs: Int!
         ) {
           createEndpoint(
             name: $name,
@@ -595,7 +637,7 @@ export async function ensureEndpoint(params: {
             idleTimeout: $idleTimeout,
             scalerType: "QUEUE_DELAY",
             scalerValue: 4,
-            executionTimeout: $executionTimeout
+            executionTimeoutMs: $executionTimeoutMs
           ) {
             id
           }
@@ -608,10 +650,54 @@ export async function ensureEndpoint(params: {
           workersMin: params.workersMin,
           workersMax: params.workersMax,
           idleTimeout: params.idleTimeout,
-          executionTimeout: params.executionTimeoutMs
+          executionTimeoutMs: params.executionTimeoutMs
         }
       );
       return data.createEndpoint.id;
+    },
+    async () => {
+      const data = await runpodGraphql<{
+        saveEndpoint: { id: string };
+      }>(
+        `mutation SaveEndpoint(
+          $name: String!,
+          $templateId: String!,
+          $gpuIds: String!,
+          $networkVolumeId: String!,
+          $workersMin: Int!,
+          $workersMax: Int!,
+          $idleTimeout: Int!,
+          $executionTimeoutMs: Int!
+        ) {
+          saveEndpoint(
+            input: {
+              name: $name,
+              templateId: $templateId,
+              gpuIds: $gpuIds,
+              networkVolumeId: $networkVolumeId,
+              workersMin: $workersMin,
+              workersMax: $workersMax,
+              idleTimeout: $idleTimeout,
+              scalerType: "QUEUE_DELAY",
+              scalerValue: 4,
+              executionTimeoutMs: $executionTimeoutMs
+            }
+          ) {
+            id
+          }
+        }`,
+        {
+          name: params.name,
+          templateId: params.templateId,
+          gpuIds: params.gpuType,
+          networkVolumeId: params.volumeId,
+          workersMin: params.workersMin,
+          workersMax: params.workersMax,
+          idleTimeout: params.idleTimeout,
+          executionTimeoutMs: params.executionTimeoutMs
+        }
+      );
+      return data.saveEndpoint.id;
     },
     async () => {
       const data = await runpodGraphql<{
@@ -653,6 +739,50 @@ export async function ensureEndpoint(params: {
           workersMax: params.workersMax,
           idleTimeout: params.idleTimeout,
           executionTimeout: params.executionTimeoutMs
+        }
+      );
+      return data.saveEndpoint.id;
+    },
+    async () => {
+      const data = await runpodGraphql<{
+        saveEndpoint: { id: string };
+      }>(
+        `mutation SaveEndpoint(
+          $name: String!,
+          $templateId: String!,
+          $gpuIds: [String!]!,
+          $networkVolumeId: String!,
+          $workersMin: Int!,
+          $workersMax: Int!,
+          $idleTimeout: Int!,
+          $executionTimeoutMs: Int!
+        ) {
+          saveEndpoint(
+            input: {
+              name: $name,
+              templateId: $templateId,
+              gpuIds: $gpuIds,
+              networkVolumeId: $networkVolumeId,
+              workersMin: $workersMin,
+              workersMax: $workersMax,
+              idleTimeout: $idleTimeout,
+              scalerType: "QUEUE_DELAY",
+              scalerValue: 4,
+              executionTimeoutMs: $executionTimeoutMs
+            }
+          ) {
+            id
+          }
+        }`,
+        {
+          name: params.name,
+          templateId: params.templateId,
+          gpuIds: [params.gpuType],
+          networkVolumeId: params.volumeId,
+          workersMin: params.workersMin,
+          workersMax: params.workersMax,
+          idleTimeout: params.idleTimeout,
+          executionTimeoutMs: params.executionTimeoutMs
         }
       );
       return data.saveEndpoint.id;
