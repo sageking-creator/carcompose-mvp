@@ -1,7 +1,7 @@
 # requirements.txt — pinned for reproducibility
 #
 # Important: do NOT install torch/torchvision inside the image.
-# The base image (runpod/pytorch:2.6.0-py3.10-cuda12.4.1) is the source of truth for CUDA/torch.
+# The base image (pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel) is the source of truth for CUDA/torch.
 # Re-installing torch in CI makes the image build slow and brittle due to huge wheel downloads.
 
 transformers==4.47.0
@@ -19,6 +19,7 @@ omegaconf==2.3.0
 einops==0.8.0
 open-clip-torch==2.26.1
 pytorch-lightning==2.4.0
+tqdm==4.66.5
 
 # libcom stack
 libcom==0.1.4

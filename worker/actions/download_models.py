@@ -115,6 +115,11 @@ def run_download_models(settings: Settings) -> Dict[str, object]:
     import transformers  # noqa: F401
     import diffusers  # noqa: F401
     import cv2
+    import torchvision  # noqa: F401
+    from omegaconf import OmegaConf  # noqa: F401
+    import einops  # noqa: F401
+    import pytorch_lightning  # noqa: F401
+    import tqdm  # noqa: F401
 
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is not available (torch.cuda.is_available() == False).")
