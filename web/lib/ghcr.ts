@@ -12,7 +12,12 @@ export type GhcrCredentials = {
 
 const GHCR_PREFIX = "ghcr.io/";
 const MANIFEST_ACCEPT =
-  "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json";
+  [
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.oci.image.manifest.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+    "application/vnd.docker.distribution.manifest.v2+json"
+  ].join(", ");
 
 function buildBasicAuth(credentials: GhcrCredentials): string {
   const encoded = Buffer.from(`${credentials.username}:${credentials.password}`, "utf8").toString("base64");
@@ -148,4 +153,3 @@ export async function assertGhcrImagePullable(
     `Failed to verify GHCR image accessibility (${manifestResponse.status}): ${bodyText || "no response body"}`
   );
 }
-
