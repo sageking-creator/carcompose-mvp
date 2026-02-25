@@ -20,8 +20,7 @@ einops==0.8.0
 open-clip-torch==2.26.1
 pytorch-lightning==2.4.0
 
-# GPSDiffusion/libcom stack
-controlnet-aux==0.0.9
+# libcom stack
 libcom==0.1.4
 
 # Model download
