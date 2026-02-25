@@ -103,10 +103,10 @@ export async function ensureVolume(params: {
   }
 
   const data = await runpodGraphql<{
-    saveNetworkVolume: { id: string };
+    createNetworkVolume: { id: string };
   }>(
     `mutation CreateNetworkVolume($name: String!, $size: Int!, $dataCenterId: String!) {
-      saveNetworkVolume(input: { name: $name, size: $size, dataCenterId: $dataCenterId }) {
+      createNetworkVolume(name: $name, size: $size, dataCenterId: $dataCenterId) {
         id
       }
     }`,
@@ -117,7 +117,7 @@ export async function ensureVolume(params: {
     }
   );
 
-  return data.saveNetworkVolume.id;
+  return data.createNetworkVolume.id;
 }
 
 export async function ensureTemplate(params: {
@@ -139,7 +139,7 @@ export async function ensureTemplate(params: {
   }
 
   const data = await runpodGraphql<{
-    saveTemplate: { id: string };
+    createTemplate: { id: string };
   }>(
     `mutation CreateTemplate(
       $name: String!,
@@ -150,18 +150,16 @@ export async function ensureTemplate(params: {
       $registryUsername: String,
       $registryPassword: String
     ) {
-      saveTemplate(
-        input: {
-          name: $name,
-          imageName: $imageName,
-          containerDiskInGb: 20,
-          volumeInGb: $volumeInGb,
-          volumeMountPath: $volumeMountPath,
-          env: $env,
-          isServerless: true,
-          registryAuthUsername: $registryUsername,
-          registryAuthPassword: $registryPassword
-        }
+      createTemplate(
+        name: $name,
+        imageName: $imageName,
+        containerDiskInGb: 20,
+        volumeInGb: $volumeInGb,
+        volumeMountPath: $volumeMountPath,
+        env: $env,
+        isServerless: true,
+        registryAuthUsername: $registryUsername,
+        registryAuthPassword: $registryPassword
       ) {
         id
       }
@@ -177,7 +175,7 @@ export async function ensureTemplate(params: {
     }
   );
 
-  return data.saveTemplate.id;
+  return data.createTemplate.id;
 }
 
 export async function ensureEndpoint(params: {
@@ -201,7 +199,7 @@ export async function ensureEndpoint(params: {
   }
 
   const data = await runpodGraphql<{
-    saveEndpoint: { id: string };
+    createEndpoint: { id: string };
   }>(
     `mutation CreateEndpoint(
       $name: String!,
@@ -213,19 +211,17 @@ export async function ensureEndpoint(params: {
       $idleTimeout: Int!,
       $executionTimeout: Int!
     ) {
-      saveEndpoint(
-        input: {
-          name: $name,
-          templateId: $templateId,
-          gpuIds: $gpuIds,
-          networkVolumeId: $networkVolumeId,
-          workersMin: $workersMin,
-          workersMax: $workersMax,
-          idleTimeout: $idleTimeout,
-          scalerType: "QUEUE_DELAY",
-          scalerValue: 4,
-          executionTimeout: $executionTimeout
-        }
+      createEndpoint(
+        name: $name,
+        templateId: $templateId,
+        gpuIds: $gpuIds,
+        networkVolumeId: $networkVolumeId,
+        workersMin: $workersMin,
+        workersMax: $workersMax,
+        idleTimeout: $idleTimeout,
+        scalerType: "QUEUE_DELAY",
+        scalerValue: 4,
+        executionTimeout: $executionTimeout
       ) {
         id
       }
@@ -242,5 +238,5 @@ export async function ensureEndpoint(params: {
     }
   );
 
-  return data.saveEndpoint.id;
+  return data.createEndpoint.id;
 }
