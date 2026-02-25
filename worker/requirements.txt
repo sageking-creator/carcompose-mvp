@@ -1,9 +1,8 @@
 # requirements.txt — pinned for reproducibility
-# CUDA 12.4 wheels — must match base Docker image (runpod/pytorch:2.6.0-py3.10-cuda12.4.1)
-torch==2.6.0+cu124
-torchvision==0.21.0+cu124
-torchaudio==2.6.0+cu124
---extra-index-url https://download.pytorch.org/whl/cu124
+#
+# Important: do NOT install torch/torchvision inside the image.
+# The base image (runpod/pytorch:2.6.0-py3.10-cuda12.4.1) is the source of truth for CUDA/torch.
+# Re-installing torch in CI makes the image build slow and brittle due to huge wheel downloads.
 
 transformers==4.47.0
 diffusers==0.32.0
