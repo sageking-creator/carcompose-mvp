@@ -9,6 +9,7 @@ export type SetupState = {
   workerImage: string;
   provisioningHash?: string;
   runpodVolumeId?: string;
+  runpodVolumeDatacenterId?: string;
   runpodTemplateId?: string;
   runpodEndpointId?: string;
   initJobId?: string;

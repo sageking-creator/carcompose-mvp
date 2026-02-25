@@ -24,6 +24,16 @@ export type RunpodHealth = {
   };
 };
 
+export type RunpodRequestItem = {
+  id: string;
+  status?: string;
+  delayTime?: number;
+};
+
+export type RunpodRequests = {
+  requests?: RunpodRequestItem[];
+};
+
 function getRunpodBaseUrl(endpointId: string): string {
   return `https://api.runpod.ai/v2/${endpointId}`;
 }
@@ -77,4 +87,20 @@ export async function getRunpodHealth(endpointId: string): Promise<RunpodHealth>
   }
 
   return (await response.json()) as RunpodHealth;
+}
+
+export async function getRunpodRequests(endpointId: string): Promise<RunpodRequests> {
+  const env = getEnv();
+  const response = await fetch(`${getRunpodBaseUrl(endpointId)}/requests`, {
+    headers: {
+      Authorization: `Bearer ${env.RUNPOD_API_KEY}`
+    }
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`RunPod requests check failed (${response.status}): ${text}`);
+  }
+
+  return (await response.json()) as RunpodRequests;
 }

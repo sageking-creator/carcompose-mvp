@@ -24,10 +24,13 @@ export type ReadyResult = {
   message: string;
   details: {
     bucket: string;
+    volumeDatacenterId?: string;
     endpointId?: string;
     initJobId?: string;
   };
 };
+
+const VOLUME_DATACENTER_FALLBACKS = ["US-NC-1", "US-TX-3"];
 
 function getTemplateEnv(env: AppEnv): Array<{ key: string; value: string }> {
   const cacheDir = env.MODEL_CACHE_DIR;
@@ -83,6 +86,10 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
+function isDatacenterNotFoundError(error: unknown): boolean {
+  return errorMessage(error).toLowerCase().includes("failed to find data center");
+}
+
 function normalizeRegistryAuthName(username: string): string {
   const cleaned = username.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/-+/g, "-");
   const trimmed = cleaned.replace(/^-+/, "").replace(/-+$/, "");
@@ -131,6 +138,7 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
     .slice()
     .sort((a, b) => a.key.localeCompare(b.key));
   const volumeName = `carcompose-models-${normalizeDatacenterToken(env.RUNPOD_DATACENTER_ID)}`;
+  let activeVolumeDatacenterId = env.RUNPOD_DATACENTER_ID;
   const provisioningHash = computeProvisioningHash({
     workerImage: resolvedWorkerImage,
     templateEnv,
@@ -165,6 +173,7 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
       workerImage: resolvedWorkerImage,
       provisioningHash,
       runpodVolumeId: "",
+      runpodVolumeDatacenterId: "",
       runpodTemplateId: "",
       runpodEndpointId: "",
       initJobId: "",
@@ -174,6 +183,7 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
 
   if (!setup.runpodVolumeId) {
     let volumeId = "";
+    let volumeDatacenterId = env.RUNPOD_DATACENTER_ID;
     try {
       volumeId = await ensureVolume({
         existingId: setup.runpodVolumeId,
@@ -182,13 +192,53 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
         datacenterId: env.RUNPOD_DATACENTER_ID
       });
     } catch (error) {
-      throw new Error(
-        `RunPod volume provisioning failed for RUNPOD_DATACENTER_ID="${env.RUNPOD_DATACENTER_ID}". ${errorMessage(error)}`
+      if (!isDatacenterNotFoundError(error)) {
+        throw new Error(
+          `RunPod volume provisioning failed for RUNPOD_DATACENTER_ID="${env.RUNPOD_DATACENTER_ID}". ${errorMessage(error)}`
+        );
+      }
+
+      const fallbackDatacenters = VOLUME_DATACENTER_FALLBACKS.filter(
+        (candidate) => candidate !== env.RUNPOD_DATACENTER_ID
       );
+      const fallbackErrors: string[] = [];
+      let fallbackCreated = false;
+
+      for (const fallbackDatacenterId of fallbackDatacenters) {
+        const fallbackVolumeName = `carcompose-models-${normalizeDatacenterToken(fallbackDatacenterId)}`;
+        try {
+          volumeId = await ensureVolume({
+            existingId: setup.runpodVolumeId,
+            name: fallbackVolumeName,
+            sizeGb: env.RUNPOD_VOLUME_GB,
+            datacenterId: fallbackDatacenterId
+          });
+          volumeDatacenterId = fallbackDatacenterId;
+          fallbackCreated = true;
+          break;
+        } catch (fallbackError) {
+          fallbackErrors.push(`${fallbackDatacenterId}: ${errorMessage(fallbackError)}`);
+        }
+      }
+
+      if (!fallbackCreated) {
+        const fallbackDetail = fallbackErrors.length
+          ? ` Fallback attempts failed: ${fallbackErrors.join(" | ")}`
+          : "";
+        throw new Error(
+          `RunPod volume provisioning failed for RUNPOD_DATACENTER_ID="${env.RUNPOD_DATACENTER_ID}". ${errorMessage(error)}${fallbackDetail}`
+        );
+      }
     }
 
-    setup = await putSetupState({ runpodVolumeId: volumeId });
+    activeVolumeDatacenterId = volumeDatacenterId;
+    setup = await putSetupState({
+      runpodVolumeId: volumeId,
+      runpodVolumeDatacenterId: volumeDatacenterId
+    });
   }
+
+  activeVolumeDatacenterId = setup.runpodVolumeDatacenterId ?? activeVolumeDatacenterId;
 
   if (!setup.runpodTemplateId) {
     let templateId = "";
@@ -252,6 +302,7 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
       message: "Model download job started.",
       details: {
         bucket: env.R2_BUCKET_NAME,
+        volumeDatacenterId: activeVolumeDatacenterId,
         endpointId,
         initJobId
       }
@@ -274,6 +325,7 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
         message: workerError,
         details: {
           bucket: env.R2_BUCKET_NAME,
+          volumeDatacenterId: activeVolumeDatacenterId,
           endpointId,
           initJobId: setup.initJobId
         }
@@ -290,6 +342,7 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
       message: "System is ready.",
       details: {
         bucket: env.R2_BUCKET_NAME,
+        volumeDatacenterId: activeVolumeDatacenterId,
         endpointId,
         initJobId: setup.initJobId
       }
@@ -324,9 +377,10 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
           phase: "downloading_models",
           message:
             "Model init job is queued waiting for GPU capacity. " +
-            `No workers are active for ${env.RUNPOD_GPU_TYPE} in ${env.RUNPOD_DATACENTER_ID} right now.`,
+            `No workers are active for ${env.RUNPOD_GPU_TYPE} in ${activeVolumeDatacenterId} right now.`,
           details: {
             bucket: env.R2_BUCKET_NAME,
+            volumeDatacenterId: activeVolumeDatacenterId,
             endpointId,
             initJobId: setup.initJobId
           }
@@ -343,6 +397,7 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
     message: "Model download in progress.",
     details: {
       bucket: env.R2_BUCKET_NAME,
+      volumeDatacenterId: activeVolumeDatacenterId,
       endpointId,
       initJobId: setup.initJobId
     }
