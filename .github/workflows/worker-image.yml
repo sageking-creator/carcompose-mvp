@@ -63,7 +63,7 @@ jobs:
             echo "If RunPod cannot pull this image, ensure the package is public or configure registry auth in Vercel (\`GHCR_USERNAME\`/\`GHCR_TOKEN\`)."
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Best-effort: make GHCR package public
+      - name: "Best-effort: make GHCR package public"
         continue-on-error: true
         env:
           OWNER: ${{ github.repository_owner }}
