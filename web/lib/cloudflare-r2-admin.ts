@@ -53,7 +53,8 @@ export async function ensureBucketExists(bucketName: string): Promise<void> {
         return;
       }
       throw new Error(
-        `R2 bucket name "${bucketName}" is already in use. Set a unique R2_BUCKET_NAME (global namespace).`
+        `R2 bucket name "${bucketName}" already exists (or cannot be created with this token). ` +
+          `Set a different R2_BUCKET_NAME or verify your Cloudflare token has R2 write permissions.`
       );
     }
     throw error;
