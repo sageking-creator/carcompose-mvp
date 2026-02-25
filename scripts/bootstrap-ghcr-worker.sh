@@ -132,7 +132,17 @@ if [[ -z "${RUN_ID:-}" || "${RUN_ID:-null}" == "null" ]]; then
   echo "Warning: could not find a workflow run yet."
   echo "Check manually in GitHub Actions: $REPO_FULL → Actions → Worker Image"
 else
+  set +e
   gh run watch "$RUN_ID" --exit-status
+  WATCH_RC=$?
+  set -e
+  if [[ $WATCH_RC -ne 0 ]]; then
+    echo
+    echo "==> Worker image workflow failed."
+    echo "==> Showing failed logs (if available):"
+    gh run view "$RUN_ID" --log-failed || true
+    exit $WATCH_RC
+  fi
 fi
 
 echo "==> Best-effort: set GHCR package visibility to public (for RunPod pulls without auth)..."
