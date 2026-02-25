@@ -163,6 +163,27 @@ export default function HomePage(): JSX.Element {
     setPasscode(next);
   };
 
+  const uploadToPresignedUrl = useCallback(async (label: string, putUrl: string, file: File): Promise<void> => {
+    try {
+      const response = await fetch(putUrl, {
+        method: "PUT",
+        headers: { "Content-Type": file.type },
+        body: file
+      });
+
+      if (!response.ok) {
+        throw new Error(`${label} upload failed (${response.status}).`);
+      }
+    } catch (error) {
+      if (error instanceof TypeError) {
+        throw new Error(
+          `${label} upload failed before reaching storage. If this is the first run, keep the page open until system initialization configures R2 CORS.`
+        );
+      }
+      throw error;
+    }
+  }, []);
+
   const handleProcess = async (): Promise<void> => {
     if (!carFile || !backgroundFile) {
       return;
@@ -188,24 +209,8 @@ export default function HomePage(): JSX.Element {
       });
 
       await Promise.all([
-        fetch(presign.car.putUrl as string, {
-          method: "PUT",
-          headers: { "Content-Type": carFile.type },
-          body: carFile
-        }).then((response) => {
-          if (!response.ok) {
-            throw new Error("Car upload failed.");
-          }
-        }),
-        fetch(presign.background.putUrl as string, {
-          method: "PUT",
-          headers: { "Content-Type": backgroundFile.type },
-          body: backgroundFile
-        }).then((response) => {
-          if (!response.ok) {
-            throw new Error("Background upload failed.");
-          }
-        })
+        uploadToPresignedUrl("Car", presign.car.putUrl as string, carFile),
+        uploadToPresignedUrl("Background", presign.background.putUrl as string, backgroundFile)
       ]);
 
       setJobState("processing");

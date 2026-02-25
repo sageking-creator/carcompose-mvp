@@ -1,7 +1,7 @@
 import { ensureBucketExists } from "@/lib/cloudflare-r2-admin";
 import { type AppEnv } from "@/lib/env";
 import { resolveGhcrImageToDigest } from "@/lib/ghcr";
-import { ensureLifecycleRules } from "@/lib/r2";
+import { ensureCorsRules, ensureLifecycleRules } from "@/lib/r2";
 import {
   ensureEndpoint,
   ensureRegistryAuth,
@@ -350,6 +350,7 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
   }
 
   await ensureBucketExists(env.R2_BUCKET_NAME);
+  await ensureCorsRules(env.R2_BUCKET_NAME);
   await ensureLifecycleRules(env.R2_BUCKET_NAME);
 
   const templateEnv = getTemplateEnv(env)

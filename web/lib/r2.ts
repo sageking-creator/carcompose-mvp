@@ -1,6 +1,7 @@
 import {
   GetObjectCommand,
   HeadObjectCommand,
+  PutBucketCorsCommand,
   PutObjectCommand,
   PutBucketLifecycleConfigurationCommand,
   S3Client
@@ -154,6 +155,25 @@ export async function ensureLifecycleRules(bucketName: string): Promise<void> {
             Status: "Enabled",
             Filter: { Prefix: "outputs/" },
             Expiration: { Days: 7 }
+          }
+        ]
+      }
+    })
+  );
+}
+
+export async function ensureCorsRules(bucketName: string): Promise<void> {
+  await getClient().send(
+    new PutBucketCorsCommand({
+      Bucket: bucketName,
+      CORSConfiguration: {
+        CORSRules: [
+          {
+            AllowedOrigins: ["*"],
+            AllowedMethods: ["GET", "PUT", "HEAD"],
+            AllowedHeaders: ["*"],
+            ExposeHeaders: ["ETag"],
+            MaxAgeSeconds: 3600
           }
         ]
       }

@@ -2,9 +2,10 @@ import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { assertPasscode } from "@/lib/auth";
+import { ensureBucketExists } from "@/lib/cloudflare-r2-admin";
 import { getEnv } from "@/lib/env";
 import { jsonError } from "@/lib/http";
-import { presignPut } from "@/lib/r2";
+import { ensureCorsRules, presignPut } from "@/lib/r2";
 import {
   buildUploadKeys,
   normalizeContentType,
@@ -25,6 +26,9 @@ export async function POST(request: Request): Promise<NextResponse> {
     if (unauthorized) {
       return unauthorized;
     }
+
+    await ensureBucketExists(env.R2_BUCKET_NAME);
+    await ensureCorsRules(env.R2_BUCKET_NAME);
 
     const payload = requestSchema.parse(await request.json());
     validateUploadContentTypes(payload.contentTypes);
