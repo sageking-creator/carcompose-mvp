@@ -36,6 +36,7 @@ function getTemplateEnv(env: AppEnv): Array<{ key: string; value: string }> {
     { key: "MODEL_CACHE_DIR", value: cacheDir },
     { key: "HF_HOME", value: hfHome },
     { key: "TRANSFORMERS_CACHE", value: hfHome },
+    { key: "LIBCOM_MODEL_DIR", value: `${cacheDir}/libcom` },
     { key: "CONTROLCOM_CKPT", value: `${cacheDir}/controlcom/ControlCom_blend_harm.pth` },
     { key: "CLIP_MODEL_DIR", value: `${cacheDir}/controlcom/openai-clip-vit-large-patch14` },
     { key: "CUDA_VISIBLE_DEVICES", value: "0" },

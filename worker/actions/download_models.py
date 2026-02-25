@@ -140,11 +140,10 @@ def run_download_models(settings: Settings) -> Dict[str, object]:
         )
 
     if variant == "full":
-        # GPSDiffusion weights must be pulled via libcom (model_type="GPSDiffusion").
         from libcom import HarmonyScoreModel, ReflectionGenerationModel, ShadowGenerationModel
 
         device = 0 if torch.cuda.is_available() else "cpu"
-        ShadowGenerationModel(device=device, model_type="GPSDiffusion")
+        ShadowGenerationModel(device=device)
         ReflectionGenerationModel(device=device)
         HarmonyScoreModel(device=device)
         downloaded.append("libcom-validated")

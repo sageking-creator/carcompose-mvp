@@ -23,7 +23,6 @@ from utils.image import (
     validate_image,
 )
 from utils.image_ops import (
-    detect_ground_plane,
     get_tight_bbox_from_mask,
     paste_mask_into_background,
     restore_high_freq_details,
@@ -188,8 +187,7 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
 
         logger.info(f"[{job_id}] Step 4: Reflection (libcom)...")
         t0 = _now_s()
-        ground_mask = detect_ground_plane(final)
-        reflection_full = models["reflection"].generate(final, foreground_mask, ground_mask)
+        reflection_full = models["reflection"].generate(final, foreground_mask)
         final = Image.blend(final, reflection_full, alpha=reflection_strength)
         timings["reflection_s"] = round(_now_s() - t0, 3)
 
@@ -233,4 +231,3 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
         output["quality"] = quality
 
     return output
-
