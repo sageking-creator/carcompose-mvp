@@ -2,6 +2,10 @@
 
 Single-tenant, one-click car compositing pipeline:
 
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/YOUR_ORG/YOUR_REPO&project-name=carcompose-mvp&repo-name=carcompose-mvp&env=APP_PASSCODE,RUNPOD_API_KEY,CLOUDFLARE_ACCOUNT_ID,CLOUDFLARE_API_TOKEN,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY,R2_BUCKET_NAME,R2_ENDPOINT_URL&root-directory=web)
+
+> **Note:** Replace `YOUR_ORG/YOUR_REPO` in the URL above with your actual GitHub username/organization and repository name before clicking.
+
 - `web/`: Next.js app on Vercel (passcode-gated API)
 - `worker/`: RunPod serverless worker (`download_models` + `composite` actions)
 - `docker/worker/Dockerfile`: GPU worker image
@@ -73,13 +77,7 @@ If you keep the GHCR package private, set `GHCR_USERNAME` and `GHCR_TOKEN` (PAT 
 3. Push:
    - `docker push ghcr.io/<owner>/<repo>-worker:main`
 
-## Deploy button (template)
 
-Replace `YOUR_ORG/YOUR_REPO` before using:
-
-```markdown
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/YOUR_ORG/YOUR_REPO&project-name=carcompose-mvp&repo-name=carcompose-mvp&env=APP_PASSCODE,RUNPOD_API_KEY,CLOUDFLARE_ACCOUNT_ID,CLOUDFLARE_API_TOKEN,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY,R2_BUCKET_NAME,R2_ENDPOINT_URL)
-```
 
 ## API summary
 
