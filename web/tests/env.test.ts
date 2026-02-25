@@ -4,6 +4,7 @@ import { EnvError } from "../lib/errors";
 import { getEnv, resetEnvCacheForTests } from "../lib/env";
 
 const requiredEnv = {
+  NODE_ENV: "test",
   APP_PASSCODE: "test",
   RUNPOD_API_KEY: "test",
   CLOUDFLARE_ACCOUNT_ID: "test",
@@ -17,7 +18,7 @@ const requiredEnv = {
 test("getEnv throws clear error when required env is missing", () => {
   const snapshot = { ...process.env };
   try {
-    process.env = { ...requiredEnv };
+    process.env = { ...requiredEnv } as NodeJS.ProcessEnv;
     delete process.env.RUNPOD_API_KEY;
 
     resetEnvCacheForTests();
@@ -27,7 +28,7 @@ test("getEnv throws clear error when required env is missing", () => {
       return true;
     });
   } finally {
-    process.env = snapshot;
+    process.env = snapshot as NodeJS.ProcessEnv;
     resetEnvCacheForTests();
   }
 });
