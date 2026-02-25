@@ -6,9 +6,23 @@ import {
   ensureEndpoint,
   ensureRegistryAuth,
   ensureTemplate,
-  ensureVolume
+  ensureVolume,
+  deleteNetworkVolume,
+  listDataCenterIds,
+  listGpuMarketForDatacenter
 } from "@/lib/runpod-admin";
-import { getRunpodHealth, getRunpodJobStatus, submitRunpodJob } from "@/lib/runpod-jobs";
+import {
+  getRunpodHealth,
+  getRunpodJobStatus,
+  getRunpodRequests,
+  purgeRunpodQueue,
+  submitRunpodJob
+} from "@/lib/runpod-jobs";
+import {
+  deleteRunpodEndpointRest,
+  listRunpodEndpointsRest,
+  patchRunpodEndpointRest
+} from "@/lib/runpod-endpoints-rest";
 import {
   getSetupState,
   putSetupState,
@@ -31,6 +45,21 @@ export type ReadyResult = {
 };
 
 const VOLUME_DATACENTER_FALLBACKS = ["US-NC-1", "US-TX-3"];
+
+const AUTOPICK_SECURE_CLOUD = true;
+const AUTOPICK_MAX_DATACENTERS = 25;
+const AUTOPICK_QUEUE_FAILOVER_AFTER_MS = 5 * 60 * 1000;
+const AUTOPICK_QUEUE_FAILOVER_COOLDOWN_MS = 10 * 60 * 1000;
+const VOLUME_DATACENTER_CANDIDATES = [
+  // Known-working (network volume create/delete verified in this account in the past).
+  "US-MD-1",
+  "US-TX-3",
+  "US-MO-2",
+  "US-GA-2",
+  "US-CA-2",
+  "US-KS-2",
+  "US-NC-1"
+];
 
 function getTemplateEnv(env: AppEnv): Array<{ key: string; value: string }> {
   const cacheDir = env.MODEL_CACHE_DIR;
@@ -100,6 +129,195 @@ function normalizeDatacenterToken(datacenterId: string): string {
   return datacenterId.toLowerCase().replace(/[^a-z0-9-]+/g, "-");
 }
 
+type PlacementCandidate = {
+  datacenterId: string;
+  gpuType: string;
+  memoryInGb: number;
+  pricePerHour: number;
+  stockStatus: string;
+  maxUnreservedGpuCount: number;
+};
+
+function minVramGbForVariant(variant: AppEnv["PIPELINE_VARIANT"]): number {
+  return variant === "full" ? 48 : 24;
+}
+
+function normalizeStockStatus(status: string | null | undefined): string {
+  if (!status) {
+    return "Unknown";
+  }
+  if (status === "High" || status === "Medium" || status === "Low") {
+    return status;
+  }
+  return status;
+}
+
+function stockRank(status: string): number {
+  if (status === "High") {
+    return 0;
+  }
+  if (status === "Medium") {
+    return 1;
+  }
+  if (status === "Low") {
+    return 2;
+  }
+  return 3;
+}
+
+function pickMarketPrice(lowestPrice: {
+  uninterruptablePrice: number | null;
+  minimumBidPrice: number | null;
+}): number | null {
+  const price = lowestPrice.uninterruptablePrice ?? lowestPrice.minimumBidPrice ?? null;
+  if (typeof price !== "number" || !Number.isFinite(price) || price <= 0) {
+    return null;
+  }
+  return price;
+}
+
+function isCudaGpuTypeId(id: string): boolean {
+  return id.startsWith("NVIDIA ");
+}
+
+function comparePlacementCandidates(a: PlacementCandidate, b: PlacementCandidate): number {
+  const stockDelta = stockRank(a.stockStatus) - stockRank(b.stockStatus);
+  if (stockDelta !== 0) {
+    return stockDelta;
+  }
+
+  const priceDelta = a.pricePerHour - b.pricePerHour;
+  if (priceDelta !== 0) {
+    return priceDelta;
+  }
+
+  const maxDelta = b.maxUnreservedGpuCount - a.maxUnreservedGpuCount;
+  if (maxDelta !== 0) {
+    return maxDelta;
+  }
+
+  return b.memoryInGb - a.memoryInGb;
+}
+
+async function bestPlacementForDatacenter(
+  datacenterId: string,
+  minVramGb: number
+): Promise<PlacementCandidate | null> {
+  const market = await listGpuMarketForDatacenter({
+    datacenterId,
+    secureCloud: AUTOPICK_SECURE_CLOUD
+  });
+
+  const candidates: PlacementCandidate[] = [];
+  for (const gpu of market) {
+    if (!isCudaGpuTypeId(gpu.id)) {
+      continue;
+    }
+
+    if (typeof gpu.memoryInGb !== "number" || gpu.memoryInGb < minVramGb) {
+      continue;
+    }
+
+    if (!gpu.lowestPrice) {
+      continue;
+    }
+
+    const pricePerHour = pickMarketPrice({
+      uninterruptablePrice: gpu.lowestPrice.uninterruptablePrice,
+      minimumBidPrice: gpu.lowestPrice.minimumBidPrice
+    });
+    if (!pricePerHour) {
+      continue;
+    }
+
+    candidates.push({
+      datacenterId,
+      gpuType: gpu.id,
+      memoryInGb: gpu.memoryInGb,
+      pricePerHour,
+      stockStatus: normalizeStockStatus(gpu.lowestPrice.stockStatus),
+      maxUnreservedGpuCount: gpu.lowestPrice.maxUnreservedGpuCount ?? 0
+    });
+  }
+
+  candidates.sort(comparePlacementCandidates);
+  return candidates[0] ?? null;
+}
+
+function buildDatacenterPreferenceList(preferredDatacenterId: string, extra: string[] = []): string[] {
+  const seen = new Set<string>();
+  const ordered = [...extra, preferredDatacenterId, ...VOLUME_DATACENTER_CANDIDATES, ...VOLUME_DATACENTER_FALLBACKS]
+    .filter(Boolean)
+    .filter((dc) => {
+      if (seen.has(dc)) {
+        return false;
+      }
+      seen.add(dc);
+      return true;
+    });
+  return ordered;
+}
+
+async function cleanupStaleCarcomposeEndpoints(params: {
+  keepEndpointId?: string;
+  keepEndpointName?: string;
+}): Promise<void> {
+  let endpoints: Array<{ id: string; name?: string }> = [];
+  try {
+    endpoints = await listRunpodEndpointsRest({ includeWorkers: false, includeTemplate: false });
+  } catch {
+    return;
+  }
+
+  const stale = endpoints.filter((endpoint) => {
+    const name = endpoint.name ?? "";
+    if (!name.startsWith("carcompose-pipeline-")) {
+      return false;
+    }
+    if (params.keepEndpointId && endpoint.id === params.keepEndpointId) {
+      return false;
+    }
+    if (params.keepEndpointName && name === params.keepEndpointName) {
+      return false;
+    }
+    return true;
+  });
+
+  for (const endpoint of stale) {
+    try {
+      const health = await getRunpodHealth(endpoint.id);
+      const workers = health.workers ?? {};
+      const jobs = health.jobs ?? {};
+      const runningLikeCount =
+        (workers.running ?? 0) + (workers.ready ?? 0) + (workers.initializing ?? 0);
+      const inProgressCount = jobs.inProgress ?? 0;
+      if (runningLikeCount > 0 || inProgressCount > 0) {
+        continue;
+      }
+    } catch {
+      // If health fails, attempt deletion anyway (purge/delete are best-effort).
+    }
+
+    try {
+      await purgeRunpodQueue(endpoint.id);
+    } catch {
+      // Ignore purge failures.
+    }
+
+    try {
+      await patchRunpodEndpointRest(endpoint.id, { workersMin: 0, workersMax: 0 });
+    } catch {
+      // Ignore; deletion may still succeed.
+    }
+
+    try {
+      await deleteRunpodEndpointRest(endpoint.id);
+    } catch {
+      // Ignore; endpoint may already be gone or protected.
+    }
+  }
+}
+
 export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
   const workerImage = resolveWorkerImage(env);
   if (!workerImage.image) {
@@ -137,15 +355,127 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
   const templateEnv = getTemplateEnv(env)
     .slice()
     .sort((a, b) => a.key.localeCompare(b.key));
-  const volumeName = `carcompose-models-${normalizeDatacenterToken(env.RUNPOD_DATACENTER_ID)}`;
-  let activeVolumeDatacenterId = env.RUNPOD_DATACENTER_ID;
+  const minVramGb = minVramGbForVariant(env.PIPELINE_VARIANT);
+
+  let setup: SetupState =
+    (await getSetupState()) ??
+    (await putSetupState({
+      bucketName: env.R2_BUCKET_NAME,
+      workerImage: resolvedWorkerImage,
+      initJobStatus: "NOT_STARTED"
+    }));
+
+  if (setup.bucketName !== env.R2_BUCKET_NAME || setup.workerImage !== resolvedWorkerImage) {
+    setup = await putSetupState({
+      bucketName: env.R2_BUCKET_NAME,
+      workerImage: resolvedWorkerImage
+    });
+  }
+
+  let selectedPlacement: PlacementCandidate | null = null;
+  if (setup.runpodVolumeId && setup.runpodVolumeDatacenterId) {
+    try {
+      selectedPlacement = await bestPlacementForDatacenter(setup.runpodVolumeDatacenterId, minVramGb);
+    } catch {
+      selectedPlacement = null;
+    }
+  }
+
+  if (!selectedPlacement) {
+    const bestByDatacenter = new Map<string, PlacementCandidate>();
+    const preferenceList = buildDatacenterPreferenceList(env.RUNPOD_DATACENTER_ID).slice(0, AUTOPICK_MAX_DATACENTERS);
+
+    for (const datacenterId of preferenceList) {
+      try {
+        const best = await bestPlacementForDatacenter(datacenterId, minVramGb);
+        if (best) {
+          bestByDatacenter.set(datacenterId, best);
+        }
+      } catch {
+        // Ignore transient RunPod market errors; continue scanning other datacenters.
+      }
+    }
+
+    if (bestByDatacenter.size === 0) {
+      try {
+        const allDatacenters = await listDataCenterIds();
+        const preferredRegion = env.RUNPOD_DATACENTER_ID.split("-")[0] ?? "US";
+        const regionDatacenters = allDatacenters
+          .filter((datacenterId) => datacenterId.startsWith(`${preferredRegion}-`))
+          .slice(0, AUTOPICK_MAX_DATACENTERS);
+
+        for (const datacenterId of regionDatacenters) {
+          if (bestByDatacenter.has(datacenterId)) {
+            continue;
+          }
+          try {
+            const best = await bestPlacementForDatacenter(datacenterId, minVramGb);
+            if (best) {
+              bestByDatacenter.set(datacenterId, best);
+            }
+          } catch {
+            // Ignore and continue.
+          }
+        }
+      } catch {
+        // Ignore and fall through to the final empty-candidate error.
+      }
+    }
+
+    const placementCandidates = [...bestByDatacenter.values()].sort(comparePlacementCandidates);
+    if (placementCandidates.length === 0) {
+      throw new Error(`RunPod autopick failed: no CUDA GPUs with >=${minVramGb}GB found.`);
+    }
+
+    const volumeProvisionErrors: string[] = [];
+    for (const candidate of placementCandidates) {
+      const candidateVolumeName = `carcompose-models-${normalizeDatacenterToken(candidate.datacenterId)}`;
+      try {
+        const volumeId = await ensureVolume({
+          name: candidateVolumeName,
+          sizeGb: env.RUNPOD_VOLUME_GB,
+          datacenterId: candidate.datacenterId
+        });
+
+        setup = await putSetupState({
+          runpodVolumeId: volumeId,
+          runpodVolumeDatacenterId: candidate.datacenterId,
+          runpodGpuType: candidate.gpuType
+        });
+        selectedPlacement = candidate;
+        break;
+      } catch (error) {
+        const message = errorMessage(error);
+        const lowered = message.toLowerCase();
+        const isDatacenterError =
+          isDatacenterNotFoundError(error) ||
+          lowered.includes("storage clusters available") ||
+          lowered.includes("no storage clusters");
+        if (isDatacenterError) {
+          volumeProvisionErrors.push(`${candidate.datacenterId}: ${message}`);
+          continue;
+        }
+        throw new Error(`RunPod volume provisioning failed for datacenter "${candidate.datacenterId}". ${message}`);
+      }
+    }
+
+    if (!selectedPlacement || !setup.runpodVolumeId || !setup.runpodVolumeDatacenterId) {
+      const detail = volumeProvisionErrors.length ? ` Attempts: ${volumeProvisionErrors.join(" | ")}` : "";
+      throw new Error(`RunPod autopick failed: unable to provision a network volume.${detail}`);
+    }
+  }
+
+  const activeVolumeDatacenterId = setup.runpodVolumeDatacenterId ?? selectedPlacement.datacenterId;
+  const selectedGpuType = setup.runpodGpuType ?? selectedPlacement.gpuType;
+  const volumeName = `carcompose-models-${normalizeDatacenterToken(activeVolumeDatacenterId)}`;
+
   const provisioningHash = computeProvisioningHash({
     workerImage: resolvedWorkerImage,
     templateEnv,
-    datacenterId: env.RUNPOD_DATACENTER_ID,
+    datacenterId: activeVolumeDatacenterId,
     volumeName,
     volumeGb: env.RUNPOD_VOLUME_GB,
-    gpuType: env.RUNPOD_GPU_TYPE,
+    gpuType: selectedGpuType,
     workersMin: env.RUNPOD_WORKERS_MIN,
     workersMax: env.RUNPOD_WORKERS_MAX,
     idleTimeout: env.RUNPOD_IDLE_TIMEOUT_S,
@@ -155,15 +485,7 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
   const desiredTemplateName = `carcompose-worker-template-${provisioningHash}`;
   const desiredEndpointName = `carcompose-pipeline-${provisioningHash}`;
 
-  let setup = await getSetupState();
-  if (!setup) {
-    setup = await putSetupState({
-      bucketName: env.R2_BUCKET_NAME,
-      workerImage: resolvedWorkerImage,
-      provisioningHash,
-      initJobStatus: "NOT_STARTED"
-    });
-  } else if (
+  if (
     setup.bucketName !== env.R2_BUCKET_NAME ||
     setup.workerImage !== resolvedWorkerImage ||
     setup.provisioningHash !== provisioningHash
@@ -172,73 +494,20 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
       bucketName: env.R2_BUCKET_NAME,
       workerImage: resolvedWorkerImage,
       provisioningHash,
-      runpodVolumeId: "",
-      runpodVolumeDatacenterId: "",
       runpodTemplateId: "",
       runpodEndpointId: "",
       initJobId: "",
-      initJobStatus: "NOT_STARTED"
+      initJobStatus: "NOT_STARTED",
+      runpodGpuType: selectedGpuType
     });
+  } else if (setup.runpodGpuType !== selectedGpuType) {
+    setup = await putSetupState({ runpodGpuType: selectedGpuType });
   }
 
-  if (!setup.runpodVolumeId) {
-    let volumeId = "";
-    let volumeDatacenterId = env.RUNPOD_DATACENTER_ID;
-    try {
-      volumeId = await ensureVolume({
-        existingId: setup.runpodVolumeId,
-        name: volumeName,
-        sizeGb: env.RUNPOD_VOLUME_GB,
-        datacenterId: env.RUNPOD_DATACENTER_ID
-      });
-    } catch (error) {
-      if (!isDatacenterNotFoundError(error)) {
-        throw new Error(
-          `RunPod volume provisioning failed for RUNPOD_DATACENTER_ID="${env.RUNPOD_DATACENTER_ID}". ${errorMessage(error)}`
-        );
-      }
-
-      const fallbackDatacenters = VOLUME_DATACENTER_FALLBACKS.filter(
-        (candidate) => candidate !== env.RUNPOD_DATACENTER_ID
-      );
-      const fallbackErrors: string[] = [];
-      let fallbackCreated = false;
-
-      for (const fallbackDatacenterId of fallbackDatacenters) {
-        const fallbackVolumeName = `carcompose-models-${normalizeDatacenterToken(fallbackDatacenterId)}`;
-        try {
-          volumeId = await ensureVolume({
-            existingId: setup.runpodVolumeId,
-            name: fallbackVolumeName,
-            sizeGb: env.RUNPOD_VOLUME_GB,
-            datacenterId: fallbackDatacenterId
-          });
-          volumeDatacenterId = fallbackDatacenterId;
-          fallbackCreated = true;
-          break;
-        } catch (fallbackError) {
-          fallbackErrors.push(`${fallbackDatacenterId}: ${errorMessage(fallbackError)}`);
-        }
-      }
-
-      if (!fallbackCreated) {
-        const fallbackDetail = fallbackErrors.length
-          ? ` Fallback attempts failed: ${fallbackErrors.join(" | ")}`
-          : "";
-        throw new Error(
-          `RunPod volume provisioning failed for RUNPOD_DATACENTER_ID="${env.RUNPOD_DATACENTER_ID}". ${errorMessage(error)}${fallbackDetail}`
-        );
-      }
-    }
-
-    activeVolumeDatacenterId = volumeDatacenterId;
-    setup = await putSetupState({
-      runpodVolumeId: volumeId,
-      runpodVolumeDatacenterId: volumeDatacenterId
-    });
-  }
-
-  activeVolumeDatacenterId = setup.runpodVolumeDatacenterId ?? activeVolumeDatacenterId;
+  await cleanupStaleCarcomposeEndpoints({
+    keepEndpointId: setup.runpodEndpointId || undefined,
+    keepEndpointName: desiredEndpointName
+  });
 
   if (!setup.runpodTemplateId) {
     let templateId = "";
@@ -270,7 +539,7 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
         name: desiredEndpointName,
         templateId: setup.runpodTemplateId,
         volumeId: setup.runpodVolumeId,
-        gpuType: env.RUNPOD_GPU_TYPE,
+        gpuType: selectedGpuType,
         workersMin: env.RUNPOD_WORKERS_MIN,
         workersMax: env.RUNPOD_WORKERS_MAX,
         idleTimeout: env.RUNPOD_IDLE_TIMEOUT_S,
@@ -278,7 +547,7 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
       });
     } catch (error) {
       throw new Error(
-        `RunPod endpoint provisioning failed for RUNPOD_GPU_TYPE="${env.RUNPOD_GPU_TYPE}". ${errorMessage(error)}`
+        `RunPod endpoint provisioning failed for RUNPOD_GPU_TYPE="${selectedGpuType}". ${errorMessage(error)}`
       );
     }
 
@@ -372,12 +641,80 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
         (workers.running ?? 0) + (workers.ready ?? 0) + (workers.initializing ?? 0);
 
       if (runningLikeCount === 0) {
+        let delayTimeMs = 0;
+        try {
+          const requests = await getRunpodRequests(endpointId);
+          const match = requests.requests?.find((item) => item.id === setup.initJobId);
+          delayTimeMs = typeof match?.delayTime === "number" ? match.delayTime : 0;
+        } catch {
+          // Ignore request probe failures.
+        }
+
+        const nowMs = Date.now();
+        const lastFailoverMs = setup.lastFailoverAt ? Date.parse(setup.lastFailoverAt) : 0;
+        const failoverCooldownOk =
+          !Number.isFinite(lastFailoverMs) || nowMs - lastFailoverMs >= AUTOPICK_QUEUE_FAILOVER_COOLDOWN_MS;
+        const failoverThresholdHit = delayTimeMs >= AUTOPICK_QUEUE_FAILOVER_AFTER_MS;
+
+        if (failoverThresholdHit && failoverCooldownOk) {
+          // Best-effort: stop burning queue time on a dead placement.
+          try {
+            await purgeRunpodQueue(endpointId);
+          } catch {
+            // Ignore.
+          }
+          try {
+            await patchRunpodEndpointRest(endpointId, { workersMin: 0, workersMax: 0 });
+          } catch {
+            // Ignore.
+          }
+          try {
+            await deleteRunpodEndpointRest(endpointId);
+          } catch {
+            // Ignore.
+          }
+
+          const volumeId = setup.runpodVolumeId;
+          if (volumeId) {
+            try {
+              await deleteNetworkVolume(volumeId);
+            } catch {
+              // Ignore volume deletion failures; stale volume cleanup can be manual.
+            }
+          }
+
+          setup = await putSetupState({
+            provisioningHash: "",
+            runpodVolumeId: "",
+            runpodVolumeDatacenterId: "",
+            runpodTemplateId: "",
+            runpodEndpointId: "",
+            runpodGpuType: "",
+            initJobId: "",
+            initJobStatus: "NOT_STARTED",
+            lastFailoverAt: new Date().toISOString(),
+            failoverCount: (setup.failoverCount ?? 0) + 1
+          });
+
+          return {
+            ready: false,
+            phase: "provisioning",
+            message:
+              "Model init job has been queued too long with no workers active. " +
+              "Cleared the queue and will reprovision in a different location/GPU on the next poll.",
+            details: {
+              bucket: env.R2_BUCKET_NAME,
+              volumeDatacenterId: activeVolumeDatacenterId
+            }
+          };
+        }
+
         return {
           ready: false,
           phase: "downloading_models",
           message:
             "Model init job is queued waiting for GPU capacity. " +
-            `No workers are active for ${env.RUNPOD_GPU_TYPE} in ${activeVolumeDatacenterId} right now.`,
+            `No workers are active for ${selectedGpuType} in ${activeVolumeDatacenterId} right now.`,
           details: {
             bucket: env.R2_BUCKET_NAME,
             volumeDatacenterId: activeVolumeDatacenterId,

@@ -104,3 +104,49 @@ export async function getRunpodRequests(endpointId: string): Promise<RunpodReque
 
   return (await response.json()) as RunpodRequests;
 }
+
+export type RunpodPurgeQueueResult = {
+  removed?: number;
+  status?: string;
+  error?: string;
+};
+
+export async function purgeRunpodQueue(endpointId: string): Promise<RunpodPurgeQueueResult> {
+  const env = getEnv();
+  const response = await fetch(`${getRunpodBaseUrl(endpointId)}/purge-queue`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.RUNPOD_API_KEY}`
+    }
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`RunPod purge queue failed (${response.status}): ${text}`);
+  }
+
+  return (await response.json()) as RunpodPurgeQueueResult;
+}
+
+export type RunpodCancelJobResult = {
+  id?: string;
+  status?: string;
+  error?: string;
+};
+
+export async function cancelRunpodJob(endpointId: string, jobId: string): Promise<RunpodCancelJobResult> {
+  const env = getEnv();
+  const response = await fetch(`${getRunpodBaseUrl(endpointId)}/cancel/${jobId}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.RUNPOD_API_KEY}`
+    }
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`RunPod cancel job failed (${response.status}): ${text}`);
+  }
+
+  return (await response.json()) as RunpodCancelJobResult;
+}

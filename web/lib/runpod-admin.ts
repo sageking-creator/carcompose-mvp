@@ -49,7 +49,13 @@ async function runpodGraphql<T>(query: string, variables?: Record<string, unknow
     body: JSON.stringify({ query, variables })
   });
 
-  const json = (await response.json()) as GraphqlResponse<T>;
+  const text = await response.text();
+  let json: GraphqlResponse<T>;
+  try {
+    json = JSON.parse(text) as GraphqlResponse<T>;
+  } catch {
+    throw new RunpodGraphqlRequestError(response.status, [text || response.statusText || "Non-JSON response"]);
+  }
   if (!response.ok || json.errors?.length) {
     const messages = json.errors?.map((item) => item.message) ?? [response.statusText || "Request failed"];
     throw new RunpodGraphqlRequestError(response.status, messages);
@@ -857,6 +863,134 @@ export async function ensureEndpoint(params: {
         }
       );
       return data.saveEndpoint.id;
+    }
+  ]);
+}
+
+export type RunpodGpuMarketItem = {
+  id: string;
+  displayName: string;
+  memoryInGb: number;
+  lowestPrice: null | {
+    uninterruptablePrice: number | null;
+    minimumBidPrice: number | null;
+    stockStatus: string | null;
+    maxUnreservedGpuCount: number | null;
+  };
+};
+
+export async function listDataCenterIds(): Promise<string[]> {
+  const data = await runpodGraphql<{ dataCenters: Array<{ id: string }> }>(
+    `query ListDataCenters {
+      dataCenters {
+        id
+      }
+    }`
+  );
+  return data.dataCenters.map((item) => item.id);
+}
+
+export async function listGpuMarketForDatacenter(params: {
+  datacenterId: string;
+  secureCloud: boolean;
+}): Promise<RunpodGpuMarketItem[]> {
+  const data = await runpodGraphql<{
+    gpuTypes: Array<RunpodGpuMarketItem>;
+  }>(
+    `query GpuMarket($datacenterId: String, $secureCloud: Boolean!) {
+      gpuTypes {
+        id
+        displayName
+        memoryInGb
+        lowestPrice(
+          input: {
+            secureCloud: $secureCloud
+            gpuCount: 1
+            globalNetwork: false
+            minDisk: 0
+            minMemoryInGb: 8
+            minVcpuCount: 2
+            dataCenterId: $datacenterId
+            compliance: null
+          }
+        ) {
+          uninterruptablePrice
+          minimumBidPrice
+          stockStatus
+          maxUnreservedGpuCount
+        }
+      }
+    }`,
+    { datacenterId: params.datacenterId, secureCloud: params.secureCloud }
+  );
+
+  return data.gpuTypes;
+}
+
+export type RunpodGpuLowestPrice = null | {
+  uninterruptablePrice: number | null;
+  minimumBidPrice: number | null;
+  stockStatus: string | null;
+  maxUnreservedGpuCount: number | null;
+};
+
+export async function getGpuLowestPrice(params: {
+  gpuTypeId: string;
+  datacenterId: string;
+  secureCloud: boolean;
+}): Promise<{ memoryInGb: number | null; lowestPrice: RunpodGpuLowestPrice }> {
+  const data = await runpodGraphql<{
+    gpuTypes: Array<{ memoryInGb: number | null; lowestPrice: RunpodGpuLowestPrice }>;
+  }>(
+    `query GpuLowestPrice($id: String!, $datacenterId: String, $secureCloud: Boolean!) {
+      gpuTypes(input: { id: $id }) {
+        memoryInGb
+        lowestPrice(
+          input: {
+            secureCloud: $secureCloud
+            gpuCount: 1
+            globalNetwork: false
+            minDisk: 0
+            minMemoryInGb: 8
+            minVcpuCount: 2
+            dataCenterId: $datacenterId
+            compliance: null
+          }
+        ) {
+          uninterruptablePrice
+          minimumBidPrice
+          stockStatus
+          maxUnreservedGpuCount
+        }
+      }
+    }`,
+    { id: params.gpuTypeId, datacenterId: params.datacenterId, secureCloud: params.secureCloud }
+  );
+
+  const first = data.gpuTypes[0];
+  return {
+    memoryInGb: first?.memoryInGb ?? null,
+    lowestPrice: first?.lowestPrice ?? null
+  };
+}
+
+export async function deleteNetworkVolume(volumeId: string): Promise<void> {
+  await runWithSchemaFallback<void>([
+    async () => {
+      await runpodGraphql<{ deleteNetworkVolume: null }>(
+        `mutation DeleteNetworkVolume($id: String!) {
+          deleteNetworkVolume(input: { id: $id })
+        }`,
+        { id: volumeId }
+      );
+    },
+    async () => {
+      await runpodGraphql<{ deleteNetworkVolume: null }>(
+        `mutation DeleteNetworkVolume($id: String!) {
+          deleteNetworkVolume(id: $id)
+        }`,
+        { id: volumeId }
+      );
     }
   ]);
 }
