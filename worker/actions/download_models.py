@@ -8,8 +8,9 @@ from huggingface_hub import hf_hub_download, snapshot_download
 
 from settings import Settings
 
-CONTROL_COM_HF_REPO = "bcmi/ControlCom"
-CONTROL_COM_HF_FILENAME = "ControlCom_blend_harm.pth"
+CONTROL_COM_HF_SOURCES = [
+    ("BCMIZB/Libcom_pretrained_models", "ControlCom_blend_harm.pth"),
+]
 CONTROL_COM_GDRIVE_ID = "1H5tCPJYRHVTLPzfUKGDxuAHXzp3ZBjGU"
 
 
@@ -36,25 +37,26 @@ def _download_controlcom(target_path: Path, hf_cache_dir: Path) -> None:
     target_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Prefer HuggingFace-hosted checkpoint (more reliable than GDrive).
-    try:
-        hf_cache_dir.mkdir(parents=True, exist_ok=True)
-        cached = hf_hub_download(
-            repo_id=CONTROL_COM_HF_REPO,
-            filename=CONTROL_COM_HF_FILENAME,
-            cache_dir=str(hf_cache_dir),
-            resume_download=True,
-        )
-        cached_path = Path(cached)
-        if cached_path.exists() and cached_path.stat().st_size > 1_000_000:
-            if target_path.exists():
-                target_path.unlink()
-            try:
-                target_path.symlink_to(cached_path)
-            except OSError:
-                shutil.copyfile(cached_path, target_path)
-            return
-    except Exception:
-        pass
+    hf_cache_dir.mkdir(parents=True, exist_ok=True)
+    for repo_id, filename in CONTROL_COM_HF_SOURCES:
+        try:
+            cached = hf_hub_download(
+                repo_id=repo_id,
+                filename=filename,
+                cache_dir=str(hf_cache_dir),
+                resume_download=True,
+            )
+            cached_path = Path(cached)
+            if cached_path.exists() and cached_path.stat().st_size > 1_000_000:
+                if target_path.exists():
+                    target_path.unlink()
+                try:
+                    target_path.symlink_to(cached_path)
+                except OSError:
+                    shutil.copyfile(cached_path, target_path)
+                return
+        except Exception:
+            continue
 
     command = [
         "gdown",
