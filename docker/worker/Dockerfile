@@ -1,6 +1,6 @@
-# NOTE: RunPod frequently changes tag naming. This tag is validated to exist on Docker Hub
-# and encodes CUDA 12.4.1 + Torch 2.6.0 + Ubuntu 22.04.
-FROM runpod/pytorch:0.7.2-dev-cu1241-torch260-ubuntu2204
+# NOTE: RunPod's `runpod/pytorch` tags drifted and no longer provide a stable Py3.10 + Torch 2.6 + CUDA 12.4
+# combination. Use the official PyTorch CUDA image for reproducible builds.
+FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel
 
 WORKDIR /app
 
