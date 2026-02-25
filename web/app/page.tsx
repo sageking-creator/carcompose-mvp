@@ -143,7 +143,13 @@ export default function HomePage(): JSX.Element {
   }, [apiFetch, passcode]);
 
   const canSubmit = useMemo(() => {
-    return readyState === "ready" && carFile && backgroundFile && (jobState === "idle" || jobState === "error");
+    return (
+      readyState !== "awaiting-passcode" &&
+      readyState !== "error" &&
+      carFile &&
+      backgroundFile &&
+      (jobState === "idle" || jobState === "error" || jobState === "success" || jobState === "rejected")
+    );
   }, [backgroundFile, carFile, jobState, readyState]);
 
   const handlePasscodeSubmit = (event: FormEvent<HTMLFormElement>): void => {
@@ -315,10 +321,13 @@ export default function HomePage(): JSX.Element {
         >
           {jobState === "uploading" && "Uploading"}
           {jobState === "processing" && "Processing"}
-          {(jobState === "idle" || jobState === "error" || jobState === "success" || jobState === "rejected") && "Process"}
+          {(jobState === "idle" || jobState === "error" || jobState === "success" || jobState === "rejected") &&
+            (readyState === "ready" ? "Process" : "Queue Job")}
         </button>
 
-        {jobState === "processing" && <p className="mt-3 text-sm text-black/70">Processing. Waiting for real pipeline status...</p>}
+        {jobState === "processing" && (
+          <p className="mt-3 text-sm text-black/70">Processing. Waiting for real pipeline status...</p>
+        )}
 
         {jobState === "success" && resultUrl && (
           <div className="mt-4 rounded-xl border border-green-700/30 bg-green-50 p-4">

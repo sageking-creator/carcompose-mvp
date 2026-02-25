@@ -3,9 +3,9 @@ import { z } from "zod";
 import { assertPasscode } from "@/lib/auth";
 import { getEnv } from "@/lib/env";
 import { jsonError } from "@/lib/http";
-import { getProvisionedSetupOrThrow } from "@/lib/ready-service";
+import { ensureReady } from "@/lib/ready-service";
 import { presignGet, presignPut } from "@/lib/r2";
-import { putJobState } from "@/lib/r2-state";
+import { getSetupState, putJobState } from "@/lib/r2-state";
 import { submitRunpodJob } from "@/lib/runpod-jobs";
 import { buildUploadKeys } from "@/lib/uploads";
 
@@ -29,35 +29,50 @@ export async function POST(request: Request): Promise<NextResponse> {
     }
 
     const payload = requestSchema.parse(await request.json());
-    const setup = await getProvisionedSetupOrThrow();
+    await ensureReady(env);
+    const setup = await getSetupState();
 
     const { carKey, backgroundKey } = buildUploadKeys(payload.jobId);
     const outputKey = `outputs/${payload.jobId}/composite.jpg`;
+    const options = {
+      harmonyThreshold: payload.options?.harmonyThreshold ?? 0.65,
+      shadowStrength: payload.options?.shadowStrength ?? 0.85,
+      reflectionStrength: payload.options?.reflectionStrength ?? 0.6
+    };
 
-    const [carImageUrl, backgroundImageUrl, outputPutUrl] = await Promise.all([
-      presignGet(carKey, 3600),
-      presignGet(backgroundKey, 3600),
-      presignPut(outputKey, "image/jpeg", 3600)
-    ]);
+    const endpointId = setup?.runpodEndpointId;
+    const canSubmitNow = Boolean(endpointId && setup?.initJobStatus === "COMPLETED");
+    let runpodJobId: string | undefined;
+    let runpodEndpointId: string | undefined;
 
-    const runpodJobId = await submitRunpodJob(setup.runpodEndpointId as string, {
-      action: "composite",
-      job_id: payload.jobId,
-      car_image_url: carImageUrl,
-      background_image_url: backgroundImageUrl,
-      output_put_url: outputPutUrl,
-      pipeline_variant: env.PIPELINE_VARIANT,
-      options: {
-        harmony_threshold: payload.options?.harmonyThreshold ?? 0.65,
-        shadow_strength: payload.options?.shadowStrength ?? 0.85,
-        reflection_strength: payload.options?.reflectionStrength ?? 0.6
-      }
-    });
+    if (canSubmitNow && endpointId) {
+      const [carImageUrl, backgroundImageUrl, outputPutUrl] = await Promise.all([
+        presignGet(carKey, 3600),
+        presignGet(backgroundKey, 3600),
+        presignPut(outputKey, "image/jpeg", 3600)
+      ]);
+
+      runpodJobId = await submitRunpodJob(endpointId, {
+        action: "composite",
+        job_id: payload.jobId,
+        car_image_url: carImageUrl,
+        background_image_url: backgroundImageUrl,
+        output_put_url: outputPutUrl,
+        pipeline_variant: env.PIPELINE_VARIANT,
+        options: {
+          harmony_threshold: options.harmonyThreshold,
+          shadow_strength: options.shadowStrength,
+          reflection_strength: options.reflectionStrength
+        }
+      });
+      runpodEndpointId = endpointId;
+    }
 
     const now = new Date().toISOString();
     await putJobState({
       jobId: payload.jobId,
       runpodJobId,
+      runpodEndpointId,
       variant: env.PIPELINE_VARIANT,
       input: {
         carKey,
@@ -66,6 +81,7 @@ export async function POST(request: Request): Promise<NextResponse> {
       output: {
         outputKey
       },
+      options,
       createdAt: now,
       updatedAt: now
     });
@@ -73,7 +89,8 @@ export async function POST(request: Request): Promise<NextResponse> {
     return NextResponse.json({
       jobId: payload.jobId,
       status: "queued",
-      runpodJobId
+      runpodJobId,
+      waitingForInit: !canSubmitNow
     });
   } catch (error) {
     return jsonError(error);

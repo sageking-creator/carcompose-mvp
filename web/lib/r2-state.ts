@@ -22,7 +22,8 @@ export type SetupState = {
 
 export type JobState = {
   jobId: string;
-  runpodJobId: string;
+  runpodJobId?: string;
+  runpodEndpointId?: string;
   variant: "core" | "full";
   input: {
     carKey: string;
@@ -30,6 +31,11 @@ export type JobState = {
   };
   output: {
     outputKey: string;
+  };
+  options: {
+    harmonyThreshold: number;
+    shadowStrength: number;
+    reflectionStrength: number;
   };
   createdAt: string;
   updatedAt: string;

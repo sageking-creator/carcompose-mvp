@@ -3,9 +3,10 @@ import { z } from "zod";
 import { assertPasscode } from "@/lib/auth";
 import { getEnv } from "@/lib/env";
 import { jsonError } from "@/lib/http";
-import { presignGet } from "@/lib/r2";
-import { getJobState, getSetupState } from "@/lib/r2-state";
-import { getRunpodJobStatus } from "@/lib/runpod-jobs";
+import { ensureReady } from "@/lib/ready-service";
+import { presignGet, presignPut } from "@/lib/r2";
+import { getJobState, getSetupState, patchJobState } from "@/lib/r2-state";
+import { getRunpodJobStatus, submitRunpodJob } from "@/lib/runpod-jobs";
 
 const paramsSchema = z.object({
   jobId: z.string().uuid()
@@ -46,14 +47,7 @@ export async function GET(
     }
 
     const { jobId } = paramsSchema.parse(context.params);
-    const [setup, job] = await Promise.all([getSetupState(), getJobState(jobId)]);
-
-    if (!setup?.runpodEndpointId) {
-      return NextResponse.json(
-        { error: "not_ready", message: "System is initializing. Try again soon." },
-        { status: 409 }
-      );
-    }
+    let [setup, job] = await Promise.all([getSetupState(), getJobState(jobId)]);
 
     if (!job) {
       return NextResponse.json(
@@ -62,7 +56,57 @@ export async function GET(
       );
     }
 
-    const runpod = await getRunpodJobStatus(setup.runpodEndpointId, job.runpodJobId);
+    if (!job.runpodJobId) {
+      await ensureReady(env);
+      [setup, job] = await Promise.all([getSetupState(), getJobState(jobId)]);
+      if (!job) {
+        return NextResponse.json(
+          { error: "not_found", message: "Job not found." },
+          { status: 404 }
+        );
+      }
+
+      if (!setup?.runpodEndpointId || setup.initJobStatus !== "COMPLETED") {
+        return NextResponse.json({ status: "processing" });
+      }
+
+      const [carImageUrl, backgroundImageUrl, outputPutUrl] = await Promise.all([
+        presignGet(job.input.carKey, 3600),
+        presignGet(job.input.backgroundKey, 3600),
+        presignPut(job.output.outputKey, "image/jpeg", 3600)
+      ]);
+
+      const submittedRunpodJobId = await submitRunpodJob(setup.runpodEndpointId, {
+        action: "composite",
+        job_id: job.jobId,
+        car_image_url: carImageUrl,
+        background_image_url: backgroundImageUrl,
+        output_put_url: outputPutUrl,
+        pipeline_variant: job.variant,
+        options: {
+          harmony_threshold: job.options.harmonyThreshold,
+          shadow_strength: job.options.shadowStrength,
+          reflection_strength: job.options.reflectionStrength
+        }
+      });
+
+      const patched = await patchJobState(jobId, {
+        runpodJobId: submittedRunpodJobId,
+        runpodEndpointId: setup.runpodEndpointId
+      });
+
+      job = patched ?? job;
+      if (!job.runpodJobId) {
+        return NextResponse.json({ status: "processing" });
+      }
+    }
+
+    const endpointId = job.runpodEndpointId ?? setup?.runpodEndpointId;
+    if (!endpointId) {
+      return NextResponse.json({ status: "processing" });
+    }
+
+    const runpod = await getRunpodJobStatus(endpointId, job.runpodJobId);
     if (runpod.status === "IN_QUEUE" || runpod.status === "IN_PROGRESS") {
       return NextResponse.json({ status: "processing" });
     }
