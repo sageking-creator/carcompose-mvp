@@ -1,0 +1,44 @@
+# requirements.txt — pinned for reproducibility
+# CUDA 12.4 wheels — must match base Docker image (runpod/pytorch:2.6.0-py3.10-cuda12.4.1)
+torch==2.6.0+cu124
+torchvision==0.21.0+cu124
+torchaudio==2.6.0+cu124
+--extra-index-url https://download.pytorch.org/whl/cu124
+
+transformers==4.47.0
+diffusers==0.32.0
+accelerate==1.3.0
+safetensors==0.4.5
+huggingface_hub==0.27.0
+
+# BiRefNet
+timm==1.0.11
+kornia==0.7.4
+
+# ControlCom (vendor/controlcom)
+omegaconf==2.3.0
+einops==0.8.0
+open-clip-torch==2.26.1
+pytorch-lightning==2.4.0
+
+# GPSDiffusion/libcom stack
+controlnet-aux==0.0.9
+libcom==0.2.2
+
+# Model download
+gdown==5.2.0
+
+# Image processing
+opencv-contrib-python-headless==4.10.0.82
+Pillow==10.4.0
+scikit-image==0.24.0
+numpy==1.26.4
+scipy==1.14.0
+
+# Runtime
+runpod==1.7.3
+requests==2.32.3
+pydantic==2.9.0
+python-dotenv==1.0.1
+loguru==0.7.2
+tenacity==9.0.0

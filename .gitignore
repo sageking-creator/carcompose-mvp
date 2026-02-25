@@ -1,0 +1,7 @@
+web/node_modules
+web/.next
+web/.turbo
+*.pyc
+__pycache__/
+.DS_Store
+.env
