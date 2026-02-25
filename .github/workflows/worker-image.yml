@@ -1,13 +1,13 @@
 name: Worker Image
 
-on:
+"on":
   push:
     branches: ["main"]
     paths:
       - "worker/**"
       - "docker/worker/**"
       - ".github/workflows/worker-image.yml"
-  workflow_dispatch:
+  workflow_dispatch: {}
 
 jobs:
   build-and-push:
