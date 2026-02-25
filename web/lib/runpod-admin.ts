@@ -138,6 +138,44 @@ async function tryFindTemplateByName(name: string): Promise<string | null> {
   return match?.id ?? null;
 }
 
+async function tryFindRegistryAuthByName(name: string): Promise<string | null> {
+  const registryCreds = await runWithSchemaFallback<Array<{ id: string; name: string }>>([
+    async () => {
+      const data = await runpodGraphql<{
+        myself?: { containerRegistryCreds?: Array<{ id: string; name: string }> };
+      }>(
+        `query ListContainerRegistryCreds {
+          myself {
+            containerRegistryCreds {
+              id
+              name
+            }
+          }
+        }`
+      );
+      return data.myself?.containerRegistryCreds ?? [];
+    },
+    async () => {
+      const data = await runpodGraphql<{
+        myself?: { registryAuths?: Array<{ id: string; name: string }> };
+      }>(
+        `query ListRegistryAuths {
+          myself {
+            registryAuths {
+              id
+              name
+            }
+          }
+        }`
+      );
+      return data.myself?.registryAuths ?? [];
+    }
+  ]);
+
+  const match = registryCreds.find((cred) => cred.name === name);
+  return match?.id ?? null;
+}
+
 async function tryFindEndpointByName(name: string): Promise<string | null> {
   const data = await runpodGraphql<{
     myself?: { endpoints?: Array<{ id: string; name: string }> };
@@ -228,14 +266,68 @@ export async function ensureVolume(params: {
   ]);
 }
 
+export async function ensureRegistryAuth(params: {
+  existingId?: string;
+  name: string;
+  username: string;
+  password: string;
+}): Promise<string> {
+  if (params.existingId) {
+    return params.existingId;
+  }
+
+  const discovered = await tryFindRegistryAuthByName(params.name);
+  if (discovered) {
+    return discovered;
+  }
+
+  return runWithSchemaFallback<string>([
+    async () => {
+      const data = await runpodGraphql<{
+        saveRegistryAuth: { id: string };
+      }>(
+        `mutation SaveRegistryAuth($input: SaveRegistryAuthInput!) {
+          saveRegistryAuth(input: $input) {
+            id
+          }
+        }`,
+        {
+          input: {
+            name: params.name,
+            username: params.username,
+            password: params.password
+          }
+        }
+      );
+      return data.saveRegistryAuth.id;
+    },
+    async () => {
+      const data = await runpodGraphql<{
+        saveRegistryAuth: { id: string };
+      }>(
+        `mutation SaveRegistryAuth($name: String!, $username: String!, $password: String!) {
+          saveRegistryAuth(input: { name: $name, username: $username, password: $password }) {
+            id
+          }
+        }`,
+        {
+          name: params.name,
+          username: params.username,
+          password: params.password
+        }
+      );
+      return data.saveRegistryAuth.id;
+    }
+  ]);
+}
+
 export async function ensureTemplate(params: {
   existingId?: string;
   name: string;
   dockerImage: string;
-  volumeGb: number;
   volumeMountPath: string;
   env: Array<{ key: string; value: string }>;
-  registryAuth?: { username: string; password: string };
+  registryAuthId?: string;
 }): Promise<string> {
   if (params.existingId) {
     return params.existingId;
@@ -245,6 +337,21 @@ export async function ensureTemplate(params: {
   if (discovered) {
     return discovered;
   }
+
+  const baseTemplateInput = {
+    name: params.name,
+    imageName: params.dockerImage,
+    containerDiskInGb: 20,
+    dockerArgs: "",
+    volumeInGb: 0,
+    volumeMountPath: params.volumeMountPath,
+    env: params.env,
+    isServerless: true
+  };
+
+  const templateInput = params.registryAuthId
+    ? { ...baseTemplateInput, containerRegistryAuthId: params.registryAuthId }
+    : baseTemplateInput;
 
   return runWithSchemaFallback<string>([
     async () => {
@@ -257,17 +364,7 @@ export async function ensureTemplate(params: {
           }
         }`,
         {
-          input: {
-            name: params.name,
-            imageName: params.dockerImage,
-            containerDiskInGb: 20,
-            volumeInGb: params.volumeGb,
-            volumeMountPath: params.volumeMountPath,
-            env: params.env,
-            isServerless: true,
-            registryAuthUsername: params.registryAuth?.username,
-            registryAuthPassword: params.registryAuth?.password
-          }
+          input: templateInput
         }
       );
       return data.createTemplate.id;
@@ -281,20 +378,19 @@ export async function ensureTemplate(params: {
           $imageName: String!,
           $volumeInGb: Int!,
           $volumeMountPath: String!,
-          $env: [EnvInput!],
-          $registryUsername: String,
-          $registryPassword: String
+          $env: [EnvironmentVariableInput]!,
+          $containerRegistryAuthId: String
         ) {
           createTemplate(
             name: $name,
             imageName: $imageName,
             containerDiskInGb: 20,
+            dockerArgs: "",
             volumeInGb: $volumeInGb,
             volumeMountPath: $volumeMountPath,
             env: $env,
             isServerless: true,
-            registryAuthUsername: $registryUsername,
-            registryAuthPassword: $registryPassword
+            containerRegistryAuthId: $containerRegistryAuthId
           ) {
             id
           }
@@ -302,14 +398,28 @@ export async function ensureTemplate(params: {
         {
           name: params.name,
           imageName: params.dockerImage,
-          volumeInGb: params.volumeGb,
+          volumeInGb: 0,
           volumeMountPath: params.volumeMountPath,
           env: params.env,
-          registryUsername: params.registryAuth?.username,
-          registryPassword: params.registryAuth?.password
+          containerRegistryAuthId: params.registryAuthId
         }
       );
       return data.createTemplate.id;
+    },
+    async () => {
+      const data = await runpodGraphql<{
+        saveTemplate: { id: string };
+      }>(
+        `mutation SaveTemplate($input: SaveTemplateInput!) {
+          saveTemplate(input: $input) {
+            id
+          }
+        }`,
+        {
+          input: templateInput
+        }
+      );
+      return data.saveTemplate.id;
     },
     async () => {
       const data = await runpodGraphql<{
@@ -320,21 +430,18 @@ export async function ensureTemplate(params: {
           $imageName: String!,
           $volumeInGb: Int!,
           $volumeMountPath: String!,
-          $env: [EnvInput!],
-          $registryUsername: String,
-          $registryPassword: String
+          $env: [EnvironmentVariableInput]!
         ) {
           saveTemplate(
             input: {
               name: $name,
               imageName: $imageName,
               containerDiskInGb: 20,
+              dockerArgs: "",
               volumeInGb: $volumeInGb,
               volumeMountPath: $volumeMountPath,
               env: $env,
-              isServerless: true,
-              registryAuthUsername: $registryUsername,
-              registryAuthPassword: $registryPassword
+              isServerless: true
             }
           ) {
             id
@@ -343,11 +450,9 @@ export async function ensureTemplate(params: {
         {
           name: params.name,
           imageName: params.dockerImage,
-          volumeInGb: params.volumeGb,
+          volumeInGb: 0,
           volumeMountPath: params.volumeMountPath,
-          env: params.env,
-          registryUsername: params.registryAuth?.username,
-          registryPassword: params.registryAuth?.password
+          env: params.env
         }
       );
       return data.saveTemplate.id;

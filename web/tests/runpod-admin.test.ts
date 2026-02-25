@@ -64,7 +64,6 @@ test("ensureTemplate falls back from createTemplate to saveTemplate", async () =
     const templateId = await ensureTemplate({
       name: "carcompose-worker-template-test",
       dockerImage: "ghcr.io/example/image:main",
-      volumeGb: 50,
       volumeMountPath: "/runpod-volume",
       env: [{ key: "PIPELINE_VARIANT", value: "core" }]
     });

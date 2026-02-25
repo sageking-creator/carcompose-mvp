@@ -4,6 +4,7 @@ import { resolveGhcrImageToDigest } from "@/lib/ghcr";
 import { ensureLifecycleRules } from "@/lib/r2";
 import {
   ensureEndpoint,
+  ensureRegistryAuth,
   ensureTemplate,
   ensureVolume
 } from "@/lib/runpod-admin";
@@ -82,6 +83,12 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
+function normalizeRegistryAuthName(username: string): string {
+  const cleaned = username.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/-+/g, "-");
+  const trimmed = cleaned.replace(/^-+/, "").replace(/-+$/, "");
+  return `carcompose-ghcr-${trimmed || "user"}`.slice(0, 63);
+}
+
 export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
   const workerImage = resolveWorkerImage(env);
   if (!workerImage.image) {
@@ -99,6 +106,19 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
       : undefined;
 
   const resolvedWorkerImage = await resolveGhcrImageToDigest(workerImage.image, registryAuth);
+  const registryAuthName = registryAuth ? normalizeRegistryAuthName(registryAuth.username) : undefined;
+  let registryAuthId: string | undefined = undefined;
+  if (registryAuth) {
+    try {
+      registryAuthId = await ensureRegistryAuth({
+        name: registryAuthName ?? "carcompose-ghcr-user",
+        username: registryAuth.username,
+        password: registryAuth.password
+      });
+    } catch (error) {
+      throw new Error(`RunPod registry auth provisioning failed: ${errorMessage(error)}`);
+    }
+  }
 
   await ensureBucketExists(env.R2_BUCKET_NAME);
   await ensureLifecycleRules(env.R2_BUCKET_NAME);
@@ -114,7 +134,8 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
     workersMin: env.RUNPOD_WORKERS_MIN,
     workersMax: env.RUNPOD_WORKERS_MAX,
     idleTimeout: env.RUNPOD_IDLE_TIMEOUT_S,
-    executionTimeoutS: env.RUNPOD_EXECUTION_TIMEOUT_S
+    executionTimeoutS: env.RUNPOD_EXECUTION_TIMEOUT_S,
+    registryAuthName: registryAuthName ?? null
   });
   const desiredTemplateName = `carcompose-worker-template-${provisioningHash}`;
   const desiredEndpointName = `carcompose-pipeline-${provisioningHash}`;
@@ -168,10 +189,9 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
         existingId: setup.runpodTemplateId,
         name: desiredTemplateName,
         dockerImage: resolvedWorkerImage,
-        volumeGb: env.RUNPOD_VOLUME_GB,
         volumeMountPath: "/runpod-volume",
         env: templateEnv,
-        registryAuth
+        registryAuthId
       });
     } catch (error) {
       throw new Error(`RunPod template provisioning failed: ${errorMessage(error)}`);
