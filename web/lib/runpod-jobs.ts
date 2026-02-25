@@ -6,6 +6,24 @@ export type RunpodJobStatus = {
   error?: string;
 };
 
+export type RunpodHealth = {
+  jobs?: {
+    completed?: number;
+    failed?: number;
+    inProgress?: number;
+    inQueue?: number;
+    retried?: number;
+  };
+  workers?: {
+    idle?: number;
+    initializing?: number;
+    ready?: number;
+    running?: number;
+    throttled?: number;
+    unhealthy?: number;
+  };
+};
+
 function getRunpodBaseUrl(endpointId: string): string {
   return `https://api.runpod.ai/v2/${endpointId}`;
 }
@@ -43,4 +61,20 @@ export async function getRunpodJobStatus(endpointId: string, jobId: string): Pro
   }
 
   return (await response.json()) as RunpodJobStatus;
+}
+
+export async function getRunpodHealth(endpointId: string): Promise<RunpodHealth> {
+  const env = getEnv();
+  const response = await fetch(`${getRunpodBaseUrl(endpointId)}/health`, {
+    headers: {
+      Authorization: `Bearer ${env.RUNPOD_API_KEY}`
+    }
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`RunPod health check failed (${response.status}): ${text}`);
+  }
+
+  return (await response.json()) as RunpodHealth;
 }

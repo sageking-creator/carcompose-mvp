@@ -103,6 +103,30 @@ async function tryFindVolumeByName(name: string): Promise<string | null> {
   return match?.id ?? null;
 }
 
+async function tryFindVolumeByNameAndDatacenter(
+  name: string,
+  datacenterId: string
+): Promise<string | null> {
+  const data = await runpodGraphql<{
+    myself?: { networkVolumes?: Array<{ id: string; name: string; dataCenterId?: string | null }> };
+  }>(
+    `query ListNetworkVolumes {
+      myself {
+        networkVolumes {
+          id
+          name
+          dataCenterId
+        }
+      }
+    }`
+  );
+
+  const match = data.myself?.networkVolumes?.find(
+    (volume) => volume.name === name && volume.dataCenterId === datacenterId
+  );
+  return match?.id ?? null;
+}
+
 async function tryFindTemplateByName(name: string): Promise<string | null> {
   const templates = await runWithSchemaFallback<Array<{ id: string; name: string }>>([
     async () => {
@@ -207,7 +231,10 @@ export async function ensureVolume(params: {
     return params.existingId;
   }
 
-  const discovered = await tryFindVolumeByName(params.name);
+  const discovered = await runWithSchemaFallback<string | null>([
+    async () => tryFindVolumeByNameAndDatacenter(params.name, params.datacenterId),
+    async () => tryFindVolumeByName(params.name)
+  ]);
   if (discovered) {
     return discovered;
   }

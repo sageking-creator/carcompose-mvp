@@ -8,7 +8,7 @@ import {
   ensureTemplate,
   ensureVolume
 } from "@/lib/runpod-admin";
-import { getRunpodJobStatus, submitRunpodJob } from "@/lib/runpod-jobs";
+import { getRunpodHealth, getRunpodJobStatus, submitRunpodJob } from "@/lib/runpod-jobs";
 import {
   getSetupState,
   putSetupState,
@@ -89,6 +89,10 @@ function normalizeRegistryAuthName(username: string): string {
   return `carcompose-ghcr-${trimmed || "user"}`.slice(0, 63);
 }
 
+function normalizeDatacenterToken(datacenterId: string): string {
+  return datacenterId.toLowerCase().replace(/[^a-z0-9-]+/g, "-");
+}
+
 export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
   const workerImage = resolveWorkerImage(env);
   if (!workerImage.image) {
@@ -126,9 +130,12 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
   const templateEnv = getTemplateEnv(env)
     .slice()
     .sort((a, b) => a.key.localeCompare(b.key));
+  const volumeName = `carcompose-models-${normalizeDatacenterToken(env.RUNPOD_DATACENTER_ID)}`;
   const provisioningHash = computeProvisioningHash({
     workerImage: resolvedWorkerImage,
     templateEnv,
+    datacenterId: env.RUNPOD_DATACENTER_ID,
+    volumeName,
     volumeGb: env.RUNPOD_VOLUME_GB,
     gpuType: env.RUNPOD_GPU_TYPE,
     workersMin: env.RUNPOD_WORKERS_MIN,
@@ -169,7 +176,7 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
     try {
       volumeId = await ensureVolume({
         existingId: setup.runpodVolumeId,
-        name: "carcompose-models",
+        name: volumeName,
         sizeGb: env.RUNPOD_VOLUME_GB,
         datacenterId: env.RUNPOD_DATACENTER_ID
       });
@@ -230,9 +237,10 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
   if (!setup.runpodEndpointId) {
     throw new Error("Provisioning error: missing endpoint ID.");
   }
+  const endpointId = setup.runpodEndpointId;
 
   if (!setup.initJobId || setup.initJobStatus === "FAILED") {
-    const initJobId = await submitRunpodJob(setup.runpodEndpointId, {
+    const initJobId = await submitRunpodJob(endpointId, {
       action: "download_models"
     });
     setup = await putSetupState({ initJobId, initJobStatus: "RUNNING" });
@@ -243,13 +251,13 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
       message: "Model download job started.",
       details: {
         bucket: env.R2_BUCKET_NAME,
-        endpointId: setup.runpodEndpointId,
+        endpointId,
         initJobId
       }
     };
   }
 
-  const initStatus = await getRunpodJobStatus(setup.runpodEndpointId, setup.initJobId);
+  const initStatus = await getRunpodJobStatus(endpointId, setup.initJobId);
   let mapped = mapInitStatus(initStatus.status);
 
   // Defensive: if the worker returns `{status:"error"}` but RunPod reports COMPLETED,
@@ -265,7 +273,7 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
         message: workerError,
         details: {
           bucket: env.R2_BUCKET_NAME,
-          endpointId: setup.runpodEndpointId,
+          endpointId,
           initJobId: setup.initJobId
         }
       };
@@ -281,7 +289,7 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
       message: "System is ready.",
       details: {
         bucket: env.R2_BUCKET_NAME,
-        endpointId: setup.runpodEndpointId,
+        endpointId,
         initJobId: setup.initJobId
       }
     };
@@ -302,13 +310,39 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
     };
   }
 
+  if (initStatus.status === "IN_QUEUE") {
+    try {
+      const health = await getRunpodHealth(endpointId);
+      const workers = health.workers ?? {};
+      const runningLikeCount =
+        (workers.running ?? 0) + (workers.ready ?? 0) + (workers.initializing ?? 0);
+
+      if (runningLikeCount === 0) {
+        return {
+          ready: false,
+          phase: "downloading_models",
+          message:
+            "Model init job is queued waiting for GPU capacity. " +
+            `No workers are active for ${env.RUNPOD_GPU_TYPE} in ${env.RUNPOD_DATACENTER_ID} right now.`,
+          details: {
+            bucket: env.R2_BUCKET_NAME,
+            endpointId,
+            initJobId: setup.initJobId
+          }
+        };
+      }
+    } catch {
+      // Keep readiness route resilient even if health probe fails.
+    }
+  }
+
   return {
     ready: false,
     phase: "downloading_models",
     message: "Model download in progress.",
     details: {
       bucket: env.R2_BUCKET_NAME,
-      endpointId: setup.runpodEndpointId,
+      endpointId,
       initJobId: setup.initJobId
     }
   };
