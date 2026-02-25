@@ -95,7 +95,9 @@ REMOTE_URL=""
 if [[ "$REMOTE_PROTOCOL" == "ssh" ]]; then
   REMOTE_URL="$(gh repo view "$REPO_FULL" --json sshUrl -q .sshUrl)"
 else
-  REMOTE_URL="$(gh repo view "$REPO_FULL" --json httpsUrl -q .httpsUrl)"
+  # `httpsUrl` was removed from newer `gh` versions. Use the web URL and convert to clone URL.
+  WEB_URL="$(gh repo view "$REPO_FULL" --json url -q .url)"
+  REMOTE_URL="${WEB_URL}.git"
 fi
 
 if git remote get-url origin >/dev/null 2>&1; then
@@ -156,4 +158,3 @@ echo
 echo "Next:"
 echo "  - Deploy the web app to Vercel from $REPO_FULL"
 echo "  - If Vercel can't infer the image, set WORKER_IMAGE=$IMAGE_MAIN"
-
