@@ -164,6 +164,7 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
       bucketName: env.R2_BUCKET_NAME,
       workerImage: resolvedWorkerImage,
       provisioningHash,
+      runpodVolumeId: "",
       runpodTemplateId: "",
       runpodEndpointId: "",
       initJobId: "",
