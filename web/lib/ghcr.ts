@@ -113,9 +113,16 @@ export async function assertGhcrImagePullable(
   image: string,
   credentials?: GhcrCredentials
 ): Promise<void> {
+  await resolveGhcrImageToDigest(image, credentials);
+}
+
+export async function resolveGhcrImageToDigest(
+  image: string,
+  credentials?: GhcrCredentials
+): Promise<string> {
   const parsedImage = parseGhcrImage(image);
   if (!parsedImage) {
-    return;
+    return image;
   }
 
   const tokenData = await fetchGhcrToken(parsedImage, credentials);
@@ -132,7 +139,20 @@ export async function assertGhcrImagePullable(
   );
 
   if (manifestResponse.ok) {
-    return;
+    const digest =
+      manifestResponse.headers.get("docker-content-digest") ?? manifestResponse.headers.get("Docker-Content-Digest");
+
+    // Some registries may omit the digest header for certain responses. In that case,
+    // fall back to the provided image reference.
+    if (!digest) {
+      return image;
+    }
+
+    if (parsedImage.reference.startsWith("sha256:")) {
+      return `ghcr.io/${parsedImage.repository}@${parsedImage.reference}`;
+    }
+
+    return `ghcr.io/${parsedImage.repository}@${digest}`;
   }
 
   const bodyText = await manifestResponse.text();

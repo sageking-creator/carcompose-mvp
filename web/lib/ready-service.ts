@@ -1,6 +1,6 @@
 import { ensureBucketExists } from "@/lib/cloudflare-r2-admin";
 import { type AppEnv } from "@/lib/env";
-import { assertGhcrImagePullable } from "@/lib/ghcr";
+import { resolveGhcrImageToDigest } from "@/lib/ghcr";
 import { ensureLifecycleRules } from "@/lib/r2";
 import {
   ensureEndpoint,
@@ -93,6 +93,13 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
     };
   }
 
+  const registryAuth =
+    env.GHCR_USERNAME && env.GHCR_TOKEN
+      ? { username: env.GHCR_USERNAME, password: env.GHCR_TOKEN }
+      : undefined;
+
+  const resolvedWorkerImage = await resolveGhcrImageToDigest(workerImage.image, registryAuth);
+
   await ensureBucketExists(env.R2_BUCKET_NAME);
   await ensureLifecycleRules(env.R2_BUCKET_NAME);
 
@@ -100,7 +107,7 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
     .slice()
     .sort((a, b) => a.key.localeCompare(b.key));
   const provisioningHash = computeProvisioningHash({
-    workerImage: workerImage.image,
+    workerImage: resolvedWorkerImage,
     templateEnv,
     volumeGb: env.RUNPOD_VOLUME_GB,
     gpuType: env.RUNPOD_GPU_TYPE,
@@ -116,18 +123,18 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
   if (!setup) {
     setup = await putSetupState({
       bucketName: env.R2_BUCKET_NAME,
-      workerImage: workerImage.image,
+      workerImage: resolvedWorkerImage,
       provisioningHash,
       initJobStatus: "NOT_STARTED"
     });
   } else if (
     setup.bucketName !== env.R2_BUCKET_NAME ||
-    setup.workerImage !== workerImage.image ||
+    setup.workerImage !== resolvedWorkerImage ||
     setup.provisioningHash !== provisioningHash
   ) {
     setup = await putSetupState({
       bucketName: env.R2_BUCKET_NAME,
-      workerImage: workerImage.image,
+      workerImage: resolvedWorkerImage,
       provisioningHash,
       runpodTemplateId: "",
       runpodEndpointId: "",
@@ -155,19 +162,12 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
   }
 
   if (!setup.runpodTemplateId) {
-    const registryAuth =
-      env.GHCR_USERNAME && env.GHCR_TOKEN
-        ? { username: env.GHCR_USERNAME, password: env.GHCR_TOKEN }
-        : undefined;
-
-    await assertGhcrImagePullable(workerImage.image, registryAuth);
-
     let templateId = "";
     try {
       templateId = await ensureTemplate({
         existingId: setup.runpodTemplateId,
         name: desiredTemplateName,
-        dockerImage: workerImage.image,
+        dockerImage: resolvedWorkerImage,
         volumeGb: env.RUNPOD_VOLUME_GB,
         volumeMountPath: "/runpod-volume",
         env: templateEnv,

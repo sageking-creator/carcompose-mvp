@@ -2,14 +2,29 @@ import { z } from "zod";
 import { EnvError } from "@/lib/errors";
 
 const envSchema = z.object({
-  APP_PASSCODE: z.string().min(1, "APP_PASSCODE is required"),
-  RUNPOD_API_KEY: z.string().min(1, "RUNPOD_API_KEY is required"),
-  CLOUDFLARE_ACCOUNT_ID: z.string().min(1, "CLOUDFLARE_ACCOUNT_ID is required"),
-  CLOUDFLARE_API_TOKEN: z.string().min(1, "CLOUDFLARE_API_TOKEN is required"),
-  R2_ACCESS_KEY_ID: z.string().min(1, "R2_ACCESS_KEY_ID is required"),
-  R2_SECRET_ACCESS_KEY: z.string().min(1, "R2_SECRET_ACCESS_KEY is required"),
+  APP_PASSCODE: z
+    .string({ required_error: "APP_PASSCODE is required" })
+    .min(1, "APP_PASSCODE is required"),
+  RUNPOD_API_KEY: z
+    .string({ required_error: "RUNPOD_API_KEY is required" })
+    .min(1, "RUNPOD_API_KEY is required"),
+  CLOUDFLARE_ACCOUNT_ID: z
+    .string({ required_error: "CLOUDFLARE_ACCOUNT_ID is required" })
+    .min(1, "CLOUDFLARE_ACCOUNT_ID is required"),
+  CLOUDFLARE_API_TOKEN: z
+    .string({ required_error: "CLOUDFLARE_API_TOKEN is required" })
+    .min(1, "CLOUDFLARE_API_TOKEN is required"),
+  R2_ACCESS_KEY_ID: z
+    .string({ required_error: "R2_ACCESS_KEY_ID is required" })
+    .min(1, "R2_ACCESS_KEY_ID is required"),
+  R2_SECRET_ACCESS_KEY: z
+    .string({ required_error: "R2_SECRET_ACCESS_KEY is required" })
+    .min(1, "R2_SECRET_ACCESS_KEY is required"),
   R2_BUCKET_NAME: z.string().min(1).default("carcompose-storage"),
-  R2_ENDPOINT_URL: z.string().url("R2_ENDPOINT_URL must be a valid URL"),
+  R2_ENDPOINT_URL: z
+    .string({ required_error: "R2_ENDPOINT_URL is required" })
+    .min(1, "R2_ENDPOINT_URL is required")
+    .url("R2_ENDPOINT_URL must be a valid URL"),
   RUNPOD_DATACENTER_ID: z.string().default("US-TX-3"),
   RUNPOD_GPU_TYPE: z.string().default("NVIDIA GeForce RTX 4090"),
   RUNPOD_VOLUME_GB: z.coerce.number().int().positive().default(50),
