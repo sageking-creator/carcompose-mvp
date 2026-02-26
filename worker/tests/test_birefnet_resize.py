@@ -44,7 +44,7 @@ class BiRefNetResizeTests(unittest.TestCase):
             self.skipTest(f"Unable to import BiRefNet helpers: {IMPORT_ERROR}")
 
         pad_h, pad_w = compute_grid_padding(1200, 1600)
-        self.assertEqual(pad_h, 9)
+        self.assertEqual(pad_h, 16)
         self.assertEqual(pad_w, 0)
 
         pad_h, pad_w = compute_grid_padding(992, 1024)

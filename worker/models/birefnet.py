@@ -12,7 +12,7 @@ from transformers import AutoModelForImageSegmentation
 from utils.refine import build_hardened_alpha, refine_foreground
 
 
-GRID_FACTOR_H = 31
+GRID_FACTOR_H = 32
 GRID_FACTOR_W = 32
 
 
