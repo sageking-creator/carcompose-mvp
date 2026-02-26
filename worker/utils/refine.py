@@ -182,6 +182,48 @@ def _build_candidate_alpha(
     return alpha, mask_bin.astype(np.uint8)
 
 
+def _tighten_alpha_from_core(
+    *,
+    alpha: np.ndarray,
+    prob: np.ndarray,
+    long_edge: int,
+) -> np.ndarray:
+    alpha = np.clip(alpha.astype(np.float32), 0.0, 1.0)
+    core = (prob >= 0.86).astype(np.uint8)
+    core = _largest_connected_component(core)
+    if core.max() == 0:
+        core = (alpha >= 0.85).astype(np.uint8)
+        core = _largest_connected_component(core)
+    if core.max() == 0:
+        return alpha
+
+    gate_radius = int(np.clip(round(long_edge * 0.007), 6, 24))
+    gate = cv2.dilate(core, _ellipse_kernel(gate_radius))
+
+    hard = (alpha >= 0.5).astype(np.uint8)
+    constrained = (hard & (gate > 0)).astype(np.uint8)
+    if constrained.max() == 0:
+        constrained = gate.astype(np.uint8)
+    constrained = _largest_connected_component(constrained)
+    if constrained.max() == 0:
+        return alpha
+
+    edge_px = int(np.clip(round(long_edge * 0.0025), 2, 7))
+    edge_kernel = _ellipse_kernel(edge_px)
+    solid = cv2.erode(constrained, edge_kernel)
+    if solid.max() == 0:
+        solid = constrained
+    dilated = cv2.dilate(constrained, edge_kernel)
+    edge_band = np.logical_and(dilated > 0, solid == 0)
+
+    alpha_soft = cv2.GaussianBlur(alpha, (0, 0), sigmaX=max(0.8, edge_px / 2.0), sigmaY=max(0.8, edge_px / 2.0))
+    tightened = np.zeros_like(alpha, dtype=np.float32)
+    tightened[solid > 0] = 1.0
+    if edge_band.any():
+        tightened[edge_band] = np.clip(np.minimum(alpha_soft[edge_band], 0.58), 0.0, 0.58)
+    return np.clip(tightened, 0.0, 1.0)
+
+
 def _mask_checks_for_alpha(alpha: np.ndarray) -> dict[str, float]:
     alpha = np.clip(alpha.astype(np.float32), 0.0, 1.0)
     hard = (alpha >= 0.5).astype(np.uint8)
@@ -338,11 +380,25 @@ def build_hardened_alpha(
         if _passes_quality_gate(checks):
             return alpha_candidate, mask_candidate.astype(np.uint8)
 
+        tightened_alpha = _tighten_alpha_from_core(alpha=alpha_candidate, prob=prob, long_edge=long_edge)
+        tightened_checks = _mask_checks_for_alpha(tightened_alpha)
+        tightened_mask = (tightened_alpha >= 0.5).astype(np.uint8)
+        tightened_mask = _largest_connected_component(tightened_mask)
+
+        if _passes_quality_gate(tightened_checks) and tightened_mask.max() > 0:
+            return tightened_alpha, tightened_mask.astype(np.uint8)
+
         score = _candidate_quality_score(checks)
         if score > best_score:
             best_score = score
             best_alpha = alpha_candidate
             best_mask = mask_candidate
+
+        tightened_score = _candidate_quality_score(tightened_checks)
+        if tightened_mask.max() > 0 and tightened_score > best_score:
+            best_score = tightened_score
+            best_alpha = tightened_alpha
+            best_mask = tightened_mask
 
     if best_alpha is not None and best_mask is not None:
         return best_alpha, best_mask.astype(np.uint8)

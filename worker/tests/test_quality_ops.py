@@ -69,6 +69,28 @@ class QualityOpsTests(unittest.TestCase):
         self.assertLess(bbox[2], 350)
         self.assertGreaterEqual(checks["interiorOpaqueRatio"], 0.985)
         self.assertLessEqual(checks["outsideLeakMeanAlpha"], 0.01)
+        self.assertLessEqual(checks["nearLeakMeanAlpha"], 0.03)
+
+    def test_hardened_alpha_tightens_broad_halo(self) -> None:
+        height, width = 320, 520
+        image_np = np.full((height, width, 3), 145, dtype=np.uint8)
+        image = Image.fromarray(image_np, mode="RGB")
+
+        prob = np.zeros((height, width), dtype=np.float32)
+        prob[95:250, 140:360] = 0.94
+        prob[78:270, 100:410] = np.maximum(prob[78:270, 100:410], 0.57)
+        prob[62:286, 70:455] = np.maximum(prob[62:286, 70:455], 0.46)
+
+        alpha, _ = build_hardened_alpha(image, prob, guided_radius=35, guided_eps=1e-4)
+        mask = Image.fromarray(np.clip(alpha * 255.0, 0.0, 255.0).astype(np.uint8), mode="L")
+        bbox = get_tight_bbox_from_mask(mask)
+        checks = compute_mask_artifact_checks(mask, bbox)
+
+        self.assertGreaterEqual(checks["interiorOpaqueRatio"], 0.985)
+        self.assertLessEqual(checks["outsideLeakMeanAlpha"], 0.01)
+        self.assertLessEqual(checks["nearLeakMeanAlpha"], 0.03)
+        self.assertLessEqual(checks["nearLeakP95Alpha"], 0.18)
+        self.assertLess(checks["maskAreaRatio"], 0.30)
 
     def test_strict_alpha_mode_uses_solid_fallback_when_core_empty(self) -> None:
         height, width = 320, 480
