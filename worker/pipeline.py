@@ -22,9 +22,12 @@ from utils.image import (
     validate_image,
 )
 from utils.image_ops import (
+    apply_contact_shadow,
+    apply_glass_normalization,
     apply_low_frequency_harmonization,
     apply_luminance_transfer_fallback,
     blend_background_only,
+    compute_mask_artifact_checks,
     compute_detail_preservation_ratio,
     get_tight_bbox_from_mask,
     paste_mask_into_background,
@@ -159,29 +162,27 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
         car_rgba_refined=car_rgba_refined, tight_bbox=tight_bbox, bg_image=bg_proc
     )
     foreground_mask = paste_mask_into_background(bg_proc.size, placement_bbox, placed_mask)
+    mask_checks = compute_mask_artifact_checks(foreground_mask, placement_bbox)
+    mask_quality_bad = (
+        mask_checks["maskAreaRatio"] < 0.005
+        or mask_checks["maskAreaRatio"] > 0.85
+        or mask_checks["interiorOpaqueRatio"] < 0.985
+        or mask_checks["outsideLeakMeanAlpha"] > 0.01
+    )
 
     logger.info(f"[{job_id}] Step 2: ControlCom harmonization...")
     t0 = _now_s()
     harmonization_method = "controlcom_lf"
     controlcom_error: str | None = None
-    try:
-        composite_guidance = models["harmonizer"].harmonize(
-            background_image=bg_proc,
-            fg_crop=placed_foreground_rgb,
-            fg_mask_crop=placed_mask,
-            placement_bbox=placement_bbox,
+    if mask_quality_bad:
+        controlcom_error = (
+            f"Mask quality check failed: area={mask_checks['maskAreaRatio']:.4f}, "
+            f"interior={mask_checks['interiorOpaqueRatio']:.4f}, "
+            f"outsideLeak={mask_checks['outsideLeakMeanAlpha']:.4f}"
         )
-        composite_harmonized = apply_low_frequency_harmonization(
-            original_composite=composite_raw,
-            harmonized_guidance=composite_guidance,
-            foreground_mask=foreground_mask,
-            foreground_bbox=placement_bbox,
-        )
-    except Exception as error:
-        controlcom_error = str(error)
         logger.warning(
-            f"[{job_id}] ControlCom harmonization failed. Falling back to deterministic luminance transfer: "
-            f"{controlcom_error}"
+            f"[{job_id}] {controlcom_error}. "
+            "Skipping ControlCom guidance and falling back to deterministic luminance transfer."
         )
         harmonization_method = "lab_transfer"
         composite_harmonized = apply_luminance_transfer_fallback(
@@ -189,6 +190,32 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
             foreground_mask=foreground_mask,
             foreground_bbox=placement_bbox,
         )
+    else:
+        try:
+            composite_guidance = models["harmonizer"].harmonize(
+                background_image=bg_proc,
+                fg_crop=placed_foreground_rgb,
+                fg_mask_crop=placed_mask,
+                placement_bbox=placement_bbox,
+            )
+            composite_harmonized = apply_low_frequency_harmonization(
+                original_composite=composite_raw,
+                harmonized_guidance=composite_guidance,
+                foreground_mask=foreground_mask,
+                foreground_bbox=placement_bbox,
+            )
+        except Exception as error:
+            controlcom_error = str(error)
+            logger.warning(
+                f"[{job_id}] ControlCom harmonization failed. Falling back to deterministic luminance transfer: "
+                f"{controlcom_error}"
+            )
+            harmonization_method = "lab_transfer"
+            composite_harmonized = apply_luminance_transfer_fallback(
+                image=composite_raw,
+                foreground_mask=foreground_mask,
+                foreground_bbox=placement_bbox,
+            )
 
     detail_ratio = compute_detail_preservation_ratio(
         baseline_image=composite_raw,
@@ -219,6 +246,20 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
     final = composite_harmonized
     harmony_score: float | None = None
     quality: str | None = None
+    contact_shadow_applied = False
+    glass_mode_applied = "off"
+
+    if variant == "core":
+        try:
+            final, contact_shadow_applied = apply_contact_shadow(
+                image=final,
+                foreground_mask=foreground_mask,
+                foreground_bbox=placement_bbox,
+                strength=settings.core_contact_shadow_strength,
+            )
+        except Exception as error:
+            logger.warning(f"[{job_id}] Contact shadow generation failed: {error}")
+            contact_shadow_applied = False
 
     if variant == "full":
         logger.info(f"[{job_id}] Step 3: GPSDiffusion shadow (libcom)...")
@@ -233,6 +274,17 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
         final = blend_background_only(final, reflection_full, foreground_mask, alpha=reflection_strength)
         timings["reflection_s"] = round(_now_s() - t0, 3)
 
+    if settings.glass_normalization_mode in {"auto", "force"}:
+        final, glass_applied = apply_glass_normalization(
+            image=final,
+            foreground_mask=foreground_mask,
+            foreground_bbox=placement_bbox,
+            mode=settings.glass_normalization_mode,
+        )
+        if glass_applied:
+            glass_mode_applied = settings.glass_normalization_mode
+
+    if variant == "full":
         logger.info(f"[{job_id}] Step 5: BargainNet QC (HarmonyScoreModel)...")
         t0 = _now_s()
         harmony_score = float(models["scorer"].score(final))
@@ -265,6 +317,14 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
     if controlcom_error and harmonization_method == "lab_transfer":
         detail_preservation["fallbackReason"] = controlcom_error[:320]
 
+    artifact_checks: Dict[str, Any] = {
+        "interiorOpaqueRatio": round(float(mask_checks["interiorOpaqueRatio"]), 4),
+        "outsideLeakMeanAlpha": round(float(mask_checks["outsideLeakMeanAlpha"]), 6),
+        "maskAreaRatio": round(float(mask_checks["maskAreaRatio"]), 4),
+        "contactShadowApplied": contact_shadow_applied,
+        "glassModeApplied": glass_mode_applied,
+    }
+
     logger.info(f"[{job_id}] Uploading output...")
     t0 = _now_s()
     upload_image_put(output_put_url, final.convert("RGB"))
@@ -278,6 +338,7 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
         "variant": variant,
         "timings": timings,
         "total_processing_s": total,
+        "artifactChecks": artifact_checks,
     }
 
     if harmony_score is not None:
@@ -285,5 +346,4 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
     if quality is not None:
         output["quality"] = quality
     output["detailPreservation"] = detail_preservation
-
     return output

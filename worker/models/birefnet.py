@@ -2,14 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import cv2
 import numpy as np
 from PIL import Image
 import torch
 from torchvision import transforms
 from transformers import AutoModelForImageSegmentation
 
-from utils.refine import refine_foreground
+from utils.refine import build_hardened_alpha, refine_foreground
 
 
 class BiRefNetSegmenter:
@@ -58,14 +57,14 @@ class BiRefNetSegmenter:
         pred = pred.sigmoid().cpu()
         pred_squeezed = pred[0].squeeze()
 
-        mask_1024 = transforms.ToPILImage()(pred_squeezed)
-        mask_pil = mask_1024.resize(orig_size, Image.Resampling.BILINEAR)
+        prob_1024 = pred_squeezed.numpy().astype(np.float32)
+        prob_pil = Image.fromarray(np.clip(prob_1024 * 255.0, 0.0, 255.0).astype(np.uint8), mode="L")
+        prob_resized = np.array(
+            prob_pil.resize(orig_size, Image.Resampling.BILINEAR),
+            dtype=np.float32,
+        ) / 255.0
 
-        mask_cv = np.array(mask_pil)
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-        mask_cv = cv2.morphologyEx(mask_cv, cv2.MORPH_CLOSE, kernel)
-        mask_cv = cv2.GaussianBlur(mask_cv, (3, 3), 0)
-        mask_pil = Image.fromarray(mask_cv, mode="L")
-
-        car_rgba = refine_foreground(img_rgb, mask_pil)
+        alpha, _ = build_hardened_alpha(img_rgb, prob_resized, threshold=0.50, guided_radius=45, guided_eps=1e-4)
+        mask_pil = Image.fromarray(np.clip(alpha * 255.0, 0.0, 255.0).astype(np.uint8), mode="L")
+        car_rgba = refine_foreground(img_rgb, alpha)
         return mask_pil, car_rgba

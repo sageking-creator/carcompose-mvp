@@ -14,6 +14,8 @@ class Settings:
     max_pixels: int
     max_output_long_edge: int
     output_resize_mode: str
+    core_contact_shadow_strength: float
+    glass_normalization_mode: str
     target_width: int
     target_height: int
 
@@ -37,6 +39,8 @@ def get_settings() -> Settings:
         max_pixels=int(os.getenv("MAX_IMAGE_PIXELS", str(40_000_000))),
         max_output_long_edge=int(os.getenv("MAX_OUTPUT_LONG_EDGE", "2048")),
         output_resize_mode=os.getenv("OUTPUT_RESIZE_MODE", "preserve").lower(),
+        core_contact_shadow_strength=float(os.getenv("CORE_CONTACT_SHADOW_STRENGTH", "0.32")),
+        glass_normalization_mode=os.getenv("GLASS_NORMALIZATION_MODE", "off").lower(),
         target_width=int(os.getenv("TARGET_WIDTH", "1920")),
         target_height=int(os.getenv("TARGET_HEIGHT", "1280")),
     )

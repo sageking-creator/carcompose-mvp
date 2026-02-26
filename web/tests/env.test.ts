@@ -42,6 +42,8 @@ test("getEnv applies worker output defaults", () => {
     const env = getEnv();
     assert.equal(env.MAX_OUTPUT_LONG_EDGE, 2048);
     assert.equal(env.OUTPUT_RESIZE_MODE, "preserve");
+    assert.equal(env.CORE_CONTACT_SHADOW_STRENGTH, 0.32);
+    assert.equal(env.GLASS_NORMALIZATION_MODE, "off");
   } finally {
     process.env = snapshot as NodeJS.ProcessEnv;
     resetEnvCacheForTests();

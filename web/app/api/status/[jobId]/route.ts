@@ -23,6 +23,13 @@ type WorkerSuccessOutput = {
     method?: string;
     fallbackReason?: string;
   };
+  artifactChecks?: {
+    interiorOpaqueRatio?: number;
+    outsideLeakMeanAlpha?: number;
+    maskAreaRatio?: number;
+    contactShadowApplied?: boolean;
+    glassModeApplied?: "off" | "auto" | "force";
+  };
 };
 
 type WorkerRejectedOutput = {
@@ -169,7 +176,8 @@ export async function GET(
       timings: success.timings ?? {},
       variant: success.variant ?? job.variant,
       quality: success.quality ?? null,
-      detailPreservation: success.detailPreservation ?? null
+      detailPreservation: success.detailPreservation ?? null,
+      artifactChecks: success.artifactChecks ?? null
     });
   } catch (error) {
     return jsonError(error, 400);

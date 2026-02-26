@@ -37,6 +37,8 @@ const envSchema = z.object({
   HF_HOME: z.string().default("/runpod-volume/hf_cache"),
   MAX_OUTPUT_LONG_EDGE: z.coerce.number().int().positive().default(2048),
   OUTPUT_RESIZE_MODE: z.enum(["preserve", "stretch"]).default("preserve"),
+  CORE_CONTACT_SHADOW_STRENGTH: z.coerce.number().min(0).max(1).default(0.32),
+  GLASS_NORMALIZATION_MODE: z.enum(["off", "auto", "force"]).default("off"),
   WORKER_IMAGE: z.string().optional(),
   GHCR_USERNAME: z.string().optional(),
   GHCR_TOKEN: z.string().optional(),

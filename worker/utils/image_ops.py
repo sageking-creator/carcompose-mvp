@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Literal, Tuple
 
 import cv2
 import numpy as np
@@ -9,25 +9,9 @@ from PIL import Image
 from exceptions import InvalidInputError
 
 
-def get_tight_bbox_from_mask(mask: Image.Image) -> Tuple[int, int, int, int]:
-    """
-    Tightest (x1,y1,x2,y2) bbox around all non-zero pixels of an "L" mask.
-
-    ControlCom requires the foreground crop to fill edge-to-edge, so this bbox must
-    be tight (with a tiny padding to avoid clipping 1px details).
-    """
-
-    mask_np = np.array(mask.convert("L"))
-    rows = np.any(mask_np > 10, axis=1)
-    cols = np.any(mask_np > 10, axis=0)
-    if not rows.any() or not cols.any():
-        raise InvalidInputError("car", "Mask is empty — segmentation found no foreground.")
-
-    rmin, rmax = np.where(rows)[0][[0, -1]]
-    cmin, cmax = np.where(cols)[0][[0, -1]]
-    h, w = mask_np.shape
-
-    return (max(0, cmin - 2), max(0, rmin - 2), min(w, cmax + 3), min(h, rmax + 3))
+def _odd_kernel_size(value: int) -> int:
+    value = max(1, int(value))
+    return value if value % 2 == 1 else value + 1
 
 
 def _clip_bbox(
@@ -43,6 +27,32 @@ def _clip_bbox(
     return (x1, y1, x2, y2)
 
 
+def get_tight_bbox_from_mask(mask: Image.Image, min_area_ratio: float = 0.005) -> Tuple[int, int, int, int]:
+    mask_np = np.array(mask.convert("L"), dtype=np.uint8)
+    hard = mask_np >= 127
+    area_ratio = float(hard.mean())
+    if area_ratio < float(min_area_ratio):
+        raise InvalidInputError(
+            "car",
+            f"Foreground mask area is too small ({area_ratio:.4f} < {min_area_ratio:.4f}).",
+        )
+
+    rows = np.any(hard, axis=1)
+    cols = np.any(hard, axis=0)
+    if not rows.any() or not cols.any():
+        raise InvalidInputError("car", "Mask is empty — segmentation found no foreground.")
+
+    rmin, rmax = np.where(rows)[0][[0, -1]]
+    cmin, cmax = np.where(cols)[0][[0, -1]]
+    height, width = mask_np.shape
+    return (
+        max(0, int(cmin) - 2),
+        max(0, int(rmin) - 2),
+        min(width, int(cmax) + 3),
+        min(height, int(rmax) + 3),
+    )
+
+
 def paste_mask_into_background(
     bg_size: Tuple[int, int],
     placement_bbox: Tuple[int, int, int, int],
@@ -56,6 +66,46 @@ def paste_mask_into_background(
     canvas = Image.new("L", bg_size, 0)
     canvas.paste(mask_crop_resized.convert("L"), (x1, y1))
     return canvas
+
+
+def compute_mask_artifact_checks(
+    foreground_mask: Image.Image,
+    foreground_bbox: Tuple[int, int, int, int],
+) -> dict[str, float]:
+    mask_l = foreground_mask.convert("L")
+    mask_np = np.array(mask_l, dtype=np.float32) / 255.0
+    hard = (mask_np >= 0.5).astype(np.uint8)
+    mask_area_ratio = float(hard.mean())
+
+    height, width = mask_np.shape
+    x1, y1, x2, y2 = _clip_bbox(foreground_bbox, width, height)
+    bbox_w = max(1, x2 - x1)
+    bbox_h = max(1, y2 - y1)
+
+    region_alpha = mask_np[y1:y2, x1:x2]
+    region_hard = hard[y1:y2, x1:x2]
+    interior_kernel_size = _odd_kernel_size(max(7, int(round(max(bbox_w, bbox_h) * 0.06))))
+    interior_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (interior_kernel_size, interior_kernel_size)
+    )
+    interior = cv2.erode(region_hard, interior_kernel)
+
+    if interior.sum() > 0:
+        interior_opaque_ratio = float(np.mean(region_alpha[interior > 0] >= 0.98))
+    else:
+        interior_opaque_ratio = float(np.mean(region_alpha >= 0.98)) if region_alpha.size else 0.0
+
+    leak_kernel_size = _odd_kernel_size(max(9, int(round(max(bbox_w, bbox_h) * 0.02))))
+    leak_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (leak_kernel_size, leak_kernel_size))
+    dilated = cv2.dilate(hard, leak_kernel)
+    outside = dilated == 0
+    outside_leak_mean_alpha = float(np.mean(mask_np[outside])) if outside.any() else 0.0
+
+    return {
+        "interiorOpaqueRatio": interior_opaque_ratio,
+        "outsideLeakMeanAlpha": outside_leak_mean_alpha,
+        "maskAreaRatio": mask_area_ratio,
+    }
 
 
 def apply_low_frequency_harmonization(
@@ -242,13 +292,132 @@ def blend_background_only(
     return Image.fromarray(np.clip(blended, 0.0, 255.0).astype(np.uint8), mode="RGB")
 
 
+def apply_contact_shadow(
+    image: Image.Image,
+    foreground_mask: Image.Image,
+    foreground_bbox: Tuple[int, int, int, int],
+    strength: float = 0.32,
+) -> tuple[Image.Image, bool]:
+    shadow_strength = max(0.0, min(1.0, float(strength)))
+    if shadow_strength <= 0.0:
+        return image.convert("RGB"), False
+
+    base_rgb = image.convert("RGB")
+    mask_l = foreground_mask.convert("L")
+    if mask_l.size != base_rgb.size:
+        mask_l = mask_l.resize(base_rgb.size, Image.Resampling.LANCZOS)
+
+    base_np = np.array(base_rgb, dtype=np.float32) / 255.0
+    mask_np = np.array(mask_l, dtype=np.float32) / 255.0
+    height, width = mask_np.shape
+
+    x1, y1, x2, y2 = _clip_bbox(foreground_bbox, width, height)
+    bbox_w = max(1, x2 - x1)
+    bbox_h = max(1, y2 - y1)
+    if bbox_w <= 1 or bbox_h <= 1:
+        return base_rgb, False
+
+    region_mask = mask_np[y1:y2, x1:x2]
+    if region_mask.max() <= 0.0:
+        return base_rgb, False
+
+    seed_start = int(round(bbox_h * (1.0 - 0.22)))
+    seed_start = max(0, min(seed_start, bbox_h - 1))
+    seed = region_mask[seed_start:, :]
+    if seed.size == 0 or seed.max() <= 0.0:
+        return base_rgb, False
+
+    squashed_h = max(3, int(round(seed.shape[0] * 0.18)))
+    seed_squashed = cv2.resize(seed, (bbox_w, squashed_h), interpolation=cv2.INTER_LINEAR)
+
+    sigma = max(6, int(round(bbox_w * 0.012)))
+    seed_blurred = cv2.GaussianBlur(seed_squashed, (0, 0), sigmaX=sigma, sigmaY=sigma)
+
+    y_offset = max(2, int(round(bbox_h * 0.01)))
+    top = int(y2 + y_offset)
+    top = max(0, min(top, height - squashed_h))
+
+    shadow_canvas = np.zeros((height, width), dtype=np.float32)
+    shadow_canvas[top : top + squashed_h, x1:x2] = np.maximum(
+        shadow_canvas[top : top + squashed_h, x1:x2], seed_blurred
+    )
+
+    fg_alpha = mask_np
+    shadow_alpha = shadow_canvas * shadow_strength * (1.0 - fg_alpha)
+    output_np = base_np * (1.0 - shadow_alpha[..., None])
+    output = np.clip(output_np * 255.0, 0.0, 255.0).astype(np.uint8)
+    return Image.fromarray(output, mode="RGB"), True
+
+
+def apply_glass_normalization(
+    image: Image.Image,
+    foreground_mask: Image.Image,
+    foreground_bbox: Tuple[int, int, int, int],
+    mode: Literal["off", "auto", "force"] = "off",
+) -> tuple[Image.Image, bool]:
+    normalized_mode = str(mode).lower()
+    if normalized_mode not in {"off", "auto", "force"}:
+        normalized_mode = "off"
+    if normalized_mode == "off":
+        return image.convert("RGB"), False
+
+    base_rgb = image.convert("RGB")
+    mask_l = foreground_mask.convert("L")
+    if mask_l.size != base_rgb.size:
+        mask_l = mask_l.resize(base_rgb.size, Image.Resampling.LANCZOS)
+
+    rgb_u8 = np.array(base_rgb, dtype=np.uint8)
+    mask_np = np.array(mask_l, dtype=np.float32) / 255.0
+    height, width = mask_np.shape
+    x1, y1, x2, y2 = _clip_bbox(foreground_bbox, width, height)
+    if x2 <= x1 or y2 <= y1:
+        return base_rgb, False
+
+    bbox_h = y2 - y1
+    upper_limit = y1 + int(round(bbox_h * 0.55))
+    upper_limit = max(y1 + 1, min(upper_limit, y2))
+
+    yy, xx = np.ogrid[:height, :width]
+    geo_region = (xx >= x1) & (xx < x2) & (yy >= y1) & (yy < upper_limit)
+    fg_region = mask_np > 0.25
+    candidate_base = geo_region & fg_region
+    if not candidate_base.any():
+        return base_rgb, False
+
+    hsv = cv2.cvtColor(rgb_u8, cv2.COLOR_RGB2HSV).astype(np.float32)
+    sat = hsv[:, :, 1] / 255.0
+    val = hsv[:, :, 2] / 255.0
+
+    if normalized_mode == "auto":
+        candidate = candidate_base & (sat < 0.35) & (val > 0.25)
+        min_pixels = max(50, int(candidate_base.sum() * 0.01))
+        if int(candidate.sum()) < min_pixels:
+            return base_rgb, False
+    else:
+        candidate = candidate_base
+
+    hsv_out = hsv.copy()
+    hsv_out[:, :, 1][candidate] = np.clip(hsv_out[:, :, 1][candidate] * 0.90, 0.0, 255.0)
+    hsv_out[:, :, 2][candidate] = np.clip(hsv_out[:, :, 2][candidate] * 0.95, 0.0, 255.0)
+
+    rgb_mod = cv2.cvtColor(hsv_out.astype(np.uint8), cv2.COLOR_HSV2RGB).astype(np.float32) / 255.0
+    base_np = rgb_u8.astype(np.float32) / 255.0
+
+    output_np = base_np.copy()
+    candidate_alpha = candidate.astype(np.float32)
+    output_np = output_np * (1.0 - candidate_alpha[..., None]) + rgb_mod * candidate_alpha[..., None]
+
+    gradient_map = np.zeros((height, width), dtype=np.float32)
+    gradient_line = np.linspace(0.08, 0.0, max(1, upper_limit - y1), dtype=np.float32)
+    gradient_map[y1:upper_limit, x1:x2] = gradient_line[:, None]
+    gradient_map = gradient_map * candidate_alpha
+    output_np = output_np * (1.0 - gradient_map[..., None]) + gradient_map[..., None]
+
+    output_u8 = np.clip(output_np * 255.0, 0.0, 255.0).astype(np.uint8)
+    return Image.fromarray(output_u8, mode="RGB"), True
+
+
 def detect_ground_plane(image: Image.Image) -> Image.Image:
-    """
-    MVP heuristic ground mask: bottom 40% of the image.
-
-    libcom.ReflectionGenerationModel uses this mask to restrict reflection to ground.
-    """
-
     w, h = image.size
     ground = np.zeros((h, w), dtype=np.uint8)
     ground[int(h * 0.60) :, :] = 255
