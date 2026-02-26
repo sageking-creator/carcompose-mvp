@@ -45,7 +45,8 @@ const envSchema = z.object({
   GHCR_USERNAME: z.string().optional(),
   GHCR_TOKEN: z.string().optional(),
   VERCEL_GIT_REPO_OWNER: z.string().optional(),
-  VERCEL_GIT_REPO_SLUG: z.string().optional()
+  VERCEL_GIT_REPO_SLUG: z.string().optional(),
+  VERCEL_GIT_COMMIT_SHA: z.string().optional()
 });
 
 export type AppEnv = z.infer<typeof envSchema>;

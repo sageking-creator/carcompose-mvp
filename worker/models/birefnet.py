@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 import numpy as np
 from PIL import Image
@@ -25,10 +26,46 @@ def compute_inference_size(width: int, height: int, max_side: int) -> tuple[int,
     return max(1, int(round(width * scale))), max(1, int(round(height * scale)))
 
 
-def compute_grid_padding(height: int, width: int) -> tuple[int, int]:
-    pad_h = (GRID_FACTOR_H - (int(height) % GRID_FACTOR_H)) % GRID_FACTOR_H
-    pad_w = (GRID_FACTOR_W - (int(width) % GRID_FACTOR_W)) % GRID_FACTOR_W
+def compute_grid_padding(height: int, width: int, grid_h: int = GRID_FACTOR_H, grid_w: int = GRID_FACTOR_W) -> tuple[int, int]:
+    pad_h = (int(grid_h) - (int(height) % int(grid_h))) % int(grid_h)
+    pad_w = (int(grid_w) - (int(width) % int(grid_w))) % int(grid_w)
     return pad_h, pad_w
+
+
+def _is_retryable_shape_error(error: Exception) -> bool:
+    message = str(error).lower()
+    return (
+        "rearrange-reduction pattern" in message
+        or ("expected input" in message and "to have" in message and "channels" in message)
+    )
+
+
+def _infer_grid_from_error(error: Exception, infer_width: int) -> tuple[int, int] | None:
+    pattern = re.compile(
+        r"expected input\[1,\s*(\d+),\s*(\d+),\s*(\d+)\]\s*to have\s*(\d+)\s*channels",
+        re.IGNORECASE,
+    )
+    match = pattern.search(str(error))
+    if not match:
+        return None
+
+    got_channels = int(match.group(1))
+    out_width = int(match.group(3))
+    expected_channels = int(match.group(4))
+    if out_width <= 0 or got_channels <= 0 or expected_channels <= 0:
+        return None
+
+    if got_channels % 3 != 0 or expected_channels % 3 != 0:
+        return None
+    expected_patch_area = expected_channels // 3
+
+    wg = max(1, int(round(float(infer_width) / float(out_width))))
+    if expected_patch_area % wg != 0:
+        return None
+    hg = expected_patch_area // wg
+    if hg <= 0:
+        return None
+    return hg, wg
 
 
 class BiRefNetSegmenter:
@@ -74,31 +111,67 @@ class BiRefNetSegmenter:
             if (infer_w, infer_h) == (orig_w, orig_h)
             else img_rgb.resize((infer_w, infer_h), Image.Resampling.LANCZOS)
         )
-        pad_h, pad_w = compute_grid_padding(infer_h, infer_w)
-        if pad_h or pad_w:
-            infer_np = np.array(infer_image, dtype=np.uint8)
-            infer_np = np.pad(
-                infer_np,
-                ((0, pad_h), (0, pad_w), (0, 0)),
-                mode="reflect",
-            )
-            infer_image = Image.fromarray(infer_np, mode="RGB")
 
-        tensor = self.transform(infer_image).unsqueeze(0).to(self.device)
-        if self.device.type == "cuda":
-            tensor = tensor.half()
+        default_grids: list[tuple[int, int]] = [
+            (GRID_FACTOR_H, GRID_FACTOR_W),
+            (31, 32),
+            (32, 31),
+            (64, 64),
+            (16, 16),
+        ]
+        queued_grids = list(default_grids)
+        seen_grids: set[tuple[int, int]] = set()
+        pred = None
+        errors: list[str] = []
 
-        outputs = self.model(tensor)
-        if isinstance(outputs, (tuple, list)):
-            pred = outputs[-1]
-        else:
-            pred = getattr(outputs, "logits", outputs)
+        while queued_grids:
+            grid_h, grid_w = queued_grids.pop(0)
+            if grid_h <= 0 or grid_w <= 0:
+                continue
+            if (grid_h, grid_w) in seen_grids:
+                continue
+            seen_grids.add((grid_h, grid_w))
 
-        pred = pred.sigmoid()
-        if pred.ndim == 3:
-            pred = pred.unsqueeze(1)
-        if pad_h or pad_w:
-            pred = pred[..., :infer_h, :infer_w]
+            pad_h, pad_w = compute_grid_padding(infer_h, infer_w, grid_h=grid_h, grid_w=grid_w)
+            padded_image = infer_image
+            if pad_h or pad_w:
+                infer_np = np.array(infer_image, dtype=np.uint8)
+                infer_np = np.pad(
+                    infer_np,
+                    ((0, pad_h), (0, pad_w), (0, 0)),
+                    mode="reflect",
+                )
+                padded_image = Image.fromarray(infer_np, mode="RGB")
+
+            try:
+                tensor = self.transform(padded_image).unsqueeze(0).to(self.device)
+                if self.device.type == "cuda":
+                    tensor = tensor.half()
+
+                outputs = self.model(tensor)
+                if isinstance(outputs, (tuple, list)):
+                    pred = outputs[-1]
+                else:
+                    pred = getattr(outputs, "logits", outputs)
+
+                pred = pred.sigmoid()
+                if pred.ndim == 3:
+                    pred = pred.unsqueeze(1)
+                if pad_h or pad_w:
+                    pred = pred[..., :infer_h, :infer_w]
+                break
+            except RuntimeError as error:
+                if not _is_retryable_shape_error(error):
+                    raise
+                errors.append(str(error))
+                inferred_grid = _infer_grid_from_error(error, infer_w)
+                if inferred_grid and inferred_grid not in seen_grids and inferred_grid not in queued_grids:
+                    queued_grids.insert(0, inferred_grid)
+
+        if pred is None:
+            error_preview = errors[-1] if errors else "unknown runtime shape error"
+            raise RuntimeError(f"BiRefNet forward failed after layout retries: {error_preview}")
+
         pred = F.interpolate(pred.float(), size=(orig_h, orig_w), mode="bilinear", align_corners=False)
         pred_squeezed = pred[0].squeeze().cpu()
 
