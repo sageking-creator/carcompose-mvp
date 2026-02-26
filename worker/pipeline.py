@@ -27,7 +27,6 @@ from utils.image_ops import (
     apply_contact_shadow,
     apply_glass_normalization,
     apply_multiband_harmonization,
-    apply_luminance_transfer_fallback,
     blend_background_only,
     compute_edge_halo_stats,
     compute_mask_artifact_checks,
@@ -316,18 +315,15 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
         controlcom_error = (
             f"Mask quality check failed: area={mask_checks['maskAreaRatio']:.4f}, "
             f"interior={mask_checks['interiorOpaqueRatio']:.4f}, "
-            f"outsideLeak={mask_checks['outsideLeakMeanAlpha']:.4f}"
+            f"outsideLeak={mask_checks['outsideLeakMeanAlpha']:.4f}, "
+            f"nearLeak={mask_checks['nearLeakMeanAlpha']:.4f}"
         )
         logger.warning(
             f"[{job_id}] {controlcom_error}. "
-            "Skipping ControlCom guidance and falling back to deterministic luminance transfer."
+            "Skipping ControlCom guidance and preserving identity composite."
         )
-        harmonization_method = "lab_transfer"
-        composite_harmonized = apply_luminance_transfer_fallback(
-            image=composite_raw,
-            foreground_mask=foreground_mask,
-            foreground_bbox=placement_bbox,
-        )
+        harmonization_method = "identity_preserve"
+        composite_harmonized = composite_raw
     else:
         try:
             composite_guidance = models["harmonizer"].harmonize(
@@ -353,15 +349,11 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
         except Exception as error:
             controlcom_error = str(error)
             logger.warning(
-                f"[{job_id}] ControlCom harmonization failed. Falling back to deterministic luminance transfer: "
+                f"[{job_id}] ControlCom harmonization failed. Preserving identity composite: "
                 f"{controlcom_error}"
             )
-            harmonization_method = "lab_transfer"
-            composite_harmonized = apply_luminance_transfer_fallback(
-                image=composite_raw,
-                foreground_mask=foreground_mask,
-                foreground_bbox=placement_bbox,
-            )
+            harmonization_method = "identity_preserve"
+            composite_harmonized = composite_raw
 
     detail_ratio = compute_detail_preservation_ratio(
         baseline_image=composite_raw,
@@ -372,14 +364,10 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
     if harmonization_method == "controlcom_multiband" and detail_ratio < 0.90:
         logger.warning(
             f"[{job_id}] Detail preservation ratio dropped to {detail_ratio:.4f}. "
-            "Switching to deterministic luminance-transfer fallback."
+            "Switching to identity-preserving fallback."
         )
-        harmonization_method = "lab_transfer"
-        composite_harmonized = apply_luminance_transfer_fallback(
-            image=composite_raw,
-            foreground_mask=foreground_mask,
-            foreground_bbox=placement_bbox,
-        )
+        harmonization_method = "identity_preserve"
+        composite_harmonized = composite_raw
         harmonization_diag = {"protectCoverageRatio": 0.0}
         detail_ratio = compute_detail_preservation_ratio(
             baseline_image=composite_raw,
@@ -404,14 +392,10 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
             f"[{job_id}] Harmonization introduced edge halos "
             f"(delta={edge_halo_after_harmonization['edgeHaloMeanDelta']:.3f}, "
             f"band={edge_halo_after_harmonization['edgeBandWidthPx']:.3f}). "
-            "Switching to deterministic luminance-transfer fallback."
+            "Switching to identity-preserving fallback."
         )
-        harmonization_method = "lab_transfer"
-        composite_harmonized = apply_luminance_transfer_fallback(
-            image=composite_raw,
-            foreground_mask=foreground_mask,
-            foreground_bbox=placement_bbox,
-        )
+        harmonization_method = "identity_preserve"
+        composite_harmonized = composite_raw
         harmonization_diag = {"protectCoverageRatio": 0.0}
         detail_ratio = compute_detail_preservation_ratio(
             baseline_image=composite_raw,
@@ -514,7 +498,7 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
         "hfRatio": round(float(detail_ratio), 4),
         "method": harmonization_method,
     }
-    if controlcom_error and harmonization_method == "lab_transfer":
+    if controlcom_error and harmonization_method != "controlcom_multiband":
         detail_preservation["fallbackReason"] = controlcom_error[:320]
 
     edge_halo_stats = compute_edge_halo_stats(
