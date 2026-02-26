@@ -36,19 +36,37 @@ def restore_high_freq_details(
     foreground_bbox: Tuple[int, int, int, int],
     blend_alpha: float = 0.25,
 ) -> Image.Image:
-    orig_np = np.array(original_composite.convert("RGB")).astype(np.float32)
-    harm_np = np.array(harmonized.convert("RGB")).astype(np.float32)
+    original_rgb = original_composite.convert("RGB")
+    harmonized_rgb = harmonized.convert("RGB")
+    if harmonized_rgb.size != original_rgb.size:
+        harmonized_rgb = harmonized_rgb.resize(original_rgb.size, Image.Resampling.LANCZOS)
+
+    orig_np = np.array(original_rgb).astype(np.float32)
+    harm_np = np.array(harmonized_rgb).astype(np.float32)
+
+    height, width = orig_np.shape[:2]
     x1, y1, x2, y2 = foreground_bbox
+    x1 = max(0, min(x1, width))
+    x2 = max(0, min(x2, width))
+    y1 = max(0, min(y1, height))
+    y2 = max(0, min(y2, height))
+    if x2 <= x1 or y2 <= y1:
+        return harmonized_rgb
 
     orig_region = orig_np[y1:y2, x1:x2]
     if orig_region.size == 0:
-        return harmonized.convert("RGB")
+        return harmonized_rgb
 
     orig_gray = cv2.cvtColor(orig_region, cv2.COLOR_RGB2GRAY).astype(np.float32)
     blurred = cv2.GaussianBlur(orig_gray, (15, 15), 0)
     hf = orig_gray - blurred
 
     result_np = harm_np.copy()
+    target_h = max(1, y2 - y1)
+    target_w = max(1, x2 - x1)
+    if hf.shape != (target_h, target_w):
+        hf = cv2.resize(hf, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+
     for c in range(3):
         result_np[y1:y2, x1:x2, c] = np.clip(
             harm_np[y1:y2, x1:x2, c] + hf * blend_alpha, 0, 255
@@ -83,4 +101,3 @@ def paste_mask_into_background(
     canvas = Image.new("L", bg_size, 0)
     canvas.paste(mask_crop_resized.convert("L"), (x1, y1))
     return canvas
-

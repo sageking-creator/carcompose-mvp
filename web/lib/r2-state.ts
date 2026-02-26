@@ -13,6 +13,7 @@ export type SetupState = {
   runpodTemplateId?: string;
   runpodEndpointId?: string;
   runpodGpuType?: string;
+  lastFailedPlacementKey?: string;
   lastFailoverAt?: string;
   failoverCount?: number;
   initJobId?: string;

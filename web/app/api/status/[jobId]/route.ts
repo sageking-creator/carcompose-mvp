@@ -111,12 +111,28 @@ export async function GET(
       return NextResponse.json({ status: "processing" });
     }
 
-    if (runpod.status === "FAILED") {
-      return NextResponse.json({ status: "error", message: runpod.error ?? "RunPod job failed." });
+    if (runpod.status === "RETRYING") {
+      return NextResponse.json({ status: "processing" });
+    }
+
+    if (
+      runpod.status === "FAILED" ||
+      runpod.status === "CANCELLED" ||
+      runpod.status === "TIMED_OUT" ||
+      runpod.status === "ABORTED"
+    ) {
+      const reason = runpod.status.toLowerCase();
+      return NextResponse.json({
+        status: "error",
+        message: runpod.error ?? `RunPod job ${reason}.`
+      });
     }
 
     if (runpod.status !== "COMPLETED") {
-      return NextResponse.json({ status: "processing" });
+      return NextResponse.json({
+        status: "error",
+        message: `Unexpected RunPod job status: ${runpod.status}`
+      });
     }
 
     const output = isRecord(runpod.output) ? runpod.output : {};

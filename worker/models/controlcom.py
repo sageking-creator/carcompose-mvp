@@ -147,4 +147,7 @@ class ControlComHarmonizer:
             if not outputs:
                 raise ModelInferenceError("ControlCom", RuntimeError("No output files produced."))
 
-            return Image.open(outputs[0]).convert("RGB")
+            result = Image.open(outputs[0]).convert("RGB")
+            if result.size != background_image.size:
+                result = result.resize(background_image.size, Image.Resampling.LANCZOS)
+            return result

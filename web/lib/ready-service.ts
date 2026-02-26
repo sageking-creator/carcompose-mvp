@@ -45,20 +45,53 @@ export type ReadyResult = {
 };
 
 const VOLUME_DATACENTER_FALLBACKS = ["US-NC-1", "US-TX-3"];
+const SERVERLESS_DATACENTER_IDS = new Set<string>([
+  "EU-RO-1",
+  "CA-MTL-1",
+  "EU-SE-1",
+  "US-IL-1",
+  "EUR-IS-1",
+  "EU-CZ-1",
+  "US-TX-3",
+  "EUR-IS-2",
+  "US-KS-2",
+  "US-GA-2",
+  "US-WA-1",
+  "US-TX-1",
+  "CA-MTL-3",
+  "EU-NL-1",
+  "US-TX-4",
+  "US-CA-2",
+  "US-NC-1",
+  "OC-AU-1",
+  "US-DE-1",
+  "EUR-IS-3",
+  "CA-MTL-2",
+  "AP-JP-1",
+  "EUR-NO-1",
+  "EU-FR-1",
+  "US-KS-3",
+  "US-GA-1"
+]);
 
 const AUTOPICK_SECURE_CLOUD = true;
 const AUTOPICK_MAX_DATACENTERS = 25;
-const AUTOPICK_QUEUE_FAILOVER_AFTER_MS = 5 * 60 * 1000;
-const AUTOPICK_QUEUE_FAILOVER_COOLDOWN_MS = 10 * 60 * 1000;
+const AUTOPICK_QUEUE_FAILOVER_AFTER_MS = 2 * 60 * 1000;
+const AUTOPICK_QUEUE_FAILOVER_COOLDOWN_MS = 4 * 60 * 1000;
 const VOLUME_DATACENTER_CANDIDATES = [
-  // Known-working (network volume create/delete verified in this account in the past).
-  "US-MD-1",
+  // Prefer serverless-supported US zones first.
   "US-TX-3",
-  "US-MO-2",
+  "US-NC-1",
   "US-GA-2",
   "US-CA-2",
+  "US-TX-1",
+  "US-WA-1",
+  "US-IL-1",
   "US-KS-2",
-  "US-NC-1"
+  "US-GA-1",
+  "US-KS-3",
+  "US-TX-4",
+  "US-DE-1"
 ];
 
 function getTemplateEnv(env: AppEnv): Array<{ key: string; value: string }> {
@@ -138,6 +171,10 @@ type PlacementCandidate = {
   maxUnreservedGpuCount: number;
 };
 
+function placementKey(datacenterId: string, gpuType: string): string {
+  return `${datacenterId}|${gpuType}`;
+}
+
 function minVramGbForVariant(variant: AppEnv["PIPELINE_VARIANT"]): number {
   return variant === "full" ? 48 : 24;
 }
@@ -180,15 +217,36 @@ function isCudaGpuTypeId(id: string): boolean {
   return id.startsWith("NVIDIA ");
 }
 
-function comparePlacementCandidates(a: PlacementCandidate, b: PlacementCandidate): number {
-  const stockDelta = stockRank(a.stockStatus) - stockRank(b.stockStatus);
-  if (stockDelta !== 0) {
-    return stockDelta;
+function hasImmediateCapacity(candidate: PlacementCandidate): boolean {
+  return candidate.maxUnreservedGpuCount > 0;
+}
+
+function comparePlacementCandidates(
+  a: PlacementCandidate,
+  b: PlacementCandidate,
+  preferredGpuType?: string
+): number {
+  if (preferredGpuType) {
+    const preferredDelta =
+      Number(a.gpuType !== preferredGpuType) - Number(b.gpuType !== preferredGpuType);
+    if (preferredDelta !== 0) {
+      return preferredDelta;
+    }
+  }
+
+  const capacityDelta = Number(!hasImmediateCapacity(a)) - Number(!hasImmediateCapacity(b));
+  if (capacityDelta !== 0) {
+    return capacityDelta;
   }
 
   const priceDelta = a.pricePerHour - b.pricePerHour;
   if (priceDelta !== 0) {
     return priceDelta;
+  }
+
+  const stockDelta = stockRank(a.stockStatus) - stockRank(b.stockStatus);
+  if (stockDelta !== 0) {
+    return stockDelta;
   }
 
   const maxDelta = b.maxUnreservedGpuCount - a.maxUnreservedGpuCount;
@@ -201,7 +259,8 @@ function comparePlacementCandidates(a: PlacementCandidate, b: PlacementCandidate
 
 async function bestPlacementForDatacenter(
   datacenterId: string,
-  minVramGb: number
+  minVramGb: number,
+  preferredGpuType?: string
 ): Promise<PlacementCandidate | null> {
   const market = await listGpuMarketForDatacenter({
     datacenterId,
@@ -240,14 +299,35 @@ async function bestPlacementForDatacenter(
     });
   }
 
-  candidates.sort(comparePlacementCandidates);
-  return candidates[0] ?? null;
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  if (preferredGpuType) {
+    const preferredGpuWithCapacity = candidates
+      .filter((item) => item.gpuType === preferredGpuType && hasImmediateCapacity(item))
+      .sort((a, b) => comparePlacementCandidates(a, b, preferredGpuType));
+    if (preferredGpuWithCapacity[0]) {
+      return preferredGpuWithCapacity[0];
+    }
+  }
+
+  const anyWithCapacity = candidates
+    .filter((item) => hasImmediateCapacity(item))
+    .sort((a, b) => comparePlacementCandidates(a, b, preferredGpuType));
+  if (anyWithCapacity[0]) {
+    return anyWithCapacity[0];
+  }
+
+  candidates.sort((a, b) => comparePlacementCandidates(a, b, preferredGpuType));
+  return candidates[0];
 }
 
 function buildDatacenterPreferenceList(preferredDatacenterId: string, extra: string[] = []): string[] {
   const seen = new Set<string>();
   const ordered = [...extra, preferredDatacenterId, ...VOLUME_DATACENTER_CANDIDATES, ...VOLUME_DATACENTER_FALLBACKS]
     .filter(Boolean)
+    .filter((dc) => SERVERLESS_DATACENTER_IDS.has(dc))
     .filter((dc) => {
       if (seen.has(dc)) {
         return false;
@@ -357,6 +437,7 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
     .slice()
     .sort((a, b) => a.key.localeCompare(b.key));
   const minVramGb = minVramGbForVariant(env.PIPELINE_VARIANT);
+  const preferredGpuType = env.RUNPOD_GPU_TYPE;
 
   let setup: SetupState =
     (await getSetupState()) ??
@@ -373,10 +454,27 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
     });
   }
 
+  const effectivePreferredGpuType =
+    (setup.failoverCount ?? 0) >= 2 ? undefined : preferredGpuType;
+
+  const canReuseExistingPlacement =
+    Boolean(setup.runpodVolumeId && setup.runpodVolumeDatacenterId) &&
+    Boolean(setup.runpodVolumeDatacenterId && SERVERLESS_DATACENTER_IDS.has(setup.runpodVolumeDatacenterId)) &&
+    (!effectivePreferredGpuType ||
+      !setup.runpodGpuType ||
+      setup.runpodGpuType === effectivePreferredGpuType) &&
+    (!setup.runpodGpuType ||
+      !setup.runpodVolumeDatacenterId ||
+      placementKey(setup.runpodVolumeDatacenterId, setup.runpodGpuType) !== setup.lastFailedPlacementKey);
+
   let selectedPlacement: PlacementCandidate | null = null;
-  if (setup.runpodVolumeId && setup.runpodVolumeDatacenterId) {
+  if (canReuseExistingPlacement && setup.runpodVolumeDatacenterId) {
     try {
-      selectedPlacement = await bestPlacementForDatacenter(setup.runpodVolumeDatacenterId, minVramGb);
+      selectedPlacement = await bestPlacementForDatacenter(
+        setup.runpodVolumeDatacenterId,
+        minVramGb,
+        effectivePreferredGpuType
+      );
     } catch {
       selectedPlacement = null;
     }
@@ -388,7 +486,11 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
 
     for (const datacenterId of preferenceList) {
       try {
-        const best = await bestPlacementForDatacenter(datacenterId, minVramGb);
+        const best = await bestPlacementForDatacenter(
+          datacenterId,
+          minVramGb,
+          effectivePreferredGpuType
+        );
         if (best) {
           bestByDatacenter.set(datacenterId, best);
         }
@@ -402,6 +504,7 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
         const allDatacenters = await listDataCenterIds();
         const preferredRegion = env.RUNPOD_DATACENTER_ID.split("-")[0] ?? "US";
         const regionDatacenters = allDatacenters
+          .filter((datacenterId) => SERVERLESS_DATACENTER_IDS.has(datacenterId))
           .filter((datacenterId) => datacenterId.startsWith(`${preferredRegion}-`))
           .slice(0, AUTOPICK_MAX_DATACENTERS);
 
@@ -410,7 +513,11 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
             continue;
           }
           try {
-            const best = await bestPlacementForDatacenter(datacenterId, minVramGb);
+            const best = await bestPlacementForDatacenter(
+              datacenterId,
+              minVramGb,
+              effectivePreferredGpuType
+            );
             if (best) {
               bestByDatacenter.set(datacenterId, best);
             }
@@ -423,13 +530,23 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
       }
     }
 
-    const placementCandidates = [...bestByDatacenter.values()].sort(comparePlacementCandidates);
-    if (placementCandidates.length === 0) {
+    const placementCandidates = [...bestByDatacenter.values()].sort((a, b) =>
+      comparePlacementCandidates(a, b, effectivePreferredGpuType)
+    );
+    const filteredPlacementCandidates = setup.lastFailedPlacementKey
+      ? placementCandidates.filter(
+          (candidate) =>
+            placementKey(candidate.datacenterId, candidate.gpuType) !== setup.lastFailedPlacementKey
+        )
+      : placementCandidates;
+    const orderedPlacementCandidates =
+      filteredPlacementCandidates.length > 0 ? filteredPlacementCandidates : placementCandidates;
+    if (orderedPlacementCandidates.length === 0) {
       throw new Error(`RunPod autopick failed: no CUDA GPUs with >=${minVramGb}GB found.`);
     }
 
     const volumeProvisionErrors: string[] = [];
-    for (const candidate of placementCandidates) {
+    for (const candidate of orderedPlacementCandidates) {
       const candidateVolumeName = `carcompose-models-${normalizeDatacenterToken(candidate.datacenterId)}`;
       try {
         const volumeId = await ensureVolume({
@@ -441,7 +558,8 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
         setup = await putSetupState({
           runpodVolumeId: volumeId,
           runpodVolumeDatacenterId: candidate.datacenterId,
-          runpodGpuType: candidate.gpuType
+          runpodGpuType: candidate.gpuType,
+          lastFailedPlacementKey: ""
         });
         selectedPlacement = candidate;
         break;
@@ -466,8 +584,14 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
     }
   }
 
-  const activeVolumeDatacenterId = setup.runpodVolumeDatacenterId ?? selectedPlacement.datacenterId;
-  const selectedGpuType = setup.runpodGpuType ?? selectedPlacement.gpuType;
+  const activeVolumeDatacenterId =
+    canReuseExistingPlacement && setup.runpodVolumeDatacenterId
+      ? setup.runpodVolumeDatacenterId
+      : selectedPlacement.datacenterId;
+  const selectedGpuType =
+    canReuseExistingPlacement && setup.runpodGpuType
+      ? setup.runpodGpuType
+      : selectedPlacement.gpuType;
   const volumeName = `carcompose-models-${normalizeDatacenterToken(activeVolumeDatacenterId)}`;
 
   const provisioningHash = computeProvisioningHash({
@@ -476,6 +600,7 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
     datacenterId: activeVolumeDatacenterId,
     volumeName,
     volumeGb: env.RUNPOD_VOLUME_GB,
+    requestedGpuType: preferredGpuType,
     gpuType: selectedGpuType,
     workersMin: env.RUNPOD_WORKERS_MIN,
     workersMax: env.RUNPOD_WORKERS_MAX,
@@ -560,6 +685,19 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
   }
   const endpointId = setup.runpodEndpointId;
 
+  try {
+    await patchRunpodEndpointRest(endpointId, {
+      dataCenterIds: [activeVolumeDatacenterId],
+      gpuTypeIds: [selectedGpuType],
+      workersMin: env.RUNPOD_WORKERS_MIN,
+      workersMax: env.RUNPOD_WORKERS_MAX,
+      idleTimeout: env.RUNPOD_IDLE_TIMEOUT_S,
+      executionTimeoutMs: env.RUNPOD_EXECUTION_TIMEOUT_S * 1000
+    });
+  } catch (error) {
+    throw new Error(`RunPod endpoint update failed: ${errorMessage(error)}`);
+  }
+
   if (!setup.initJobId || setup.initJobStatus === "FAILED") {
     const initJobId = await submitRunpodJob(endpointId, {
       action: "download_models"
@@ -603,7 +741,11 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
     }
   }
 
-  setup = await putSetupState({ initJobStatus: mapped });
+  setup = await putSetupState(
+    mapped === "COMPLETED"
+      ? { initJobStatus: mapped, failoverCount: 0, lastFailedPlacementKey: "" }
+      : { initJobStatus: mapped }
+  );
 
   if (mapped === "COMPLETED") {
     return {
@@ -691,6 +833,7 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
             runpodTemplateId: "",
             runpodEndpointId: "",
             runpodGpuType: "",
+            lastFailedPlacementKey: placementKey(activeVolumeDatacenterId, selectedGpuType),
             initJobId: "",
             initJobStatus: "NOT_STARTED",
             lastFailoverAt: new Date().toISOString(),
