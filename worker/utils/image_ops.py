@@ -400,7 +400,12 @@ def apply_glass_normalization(
     hsv_out[:, :, 1][candidate] = np.clip(hsv_out[:, :, 1][candidate] * 0.90, 0.0, 255.0)
     hsv_out[:, :, 2][candidate] = np.clip(hsv_out[:, :, 2][candidate] * 0.95, 0.0, 255.0)
 
-    rgb_mod = cv2.cvtColor(hsv_out.astype(np.uint8), cv2.COLOR_HSV2RGB).astype(np.float32) / 255.0
+    rgb_mod_u8 = cv2.cvtColor(hsv_out.astype(np.uint8), cv2.COLOR_HSV2RGB)
+    rgb_blur_u8 = cv2.bilateralFilter(rgb_mod_u8, d=9, sigmaColor=60, sigmaSpace=9)
+    rgb_mod_u8 = np.clip((rgb_mod_u8.astype(np.float32) * 0.4) + (rgb_blur_u8.astype(np.float32) * 0.6), 0, 255).astype(
+        np.uint8
+    )
+    rgb_mod = rgb_mod_u8.astype(np.float32) / 255.0
     base_np = rgb_u8.astype(np.float32) / 255.0
 
     output_np = base_np.copy()

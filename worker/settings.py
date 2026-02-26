@@ -6,6 +6,8 @@ import os
 class Settings:
     model_cache_dir: str
     hf_home: str
+    birefnet_repo_id: str
+    birefnet_max_side: int
     pipeline_variant: str
     controlcom_ckpt: str
     clip_model_dir: str
@@ -25,6 +27,8 @@ def get_settings() -> Settings:
     return Settings(
         model_cache_dir=os.getenv("MODEL_CACHE_DIR", "/runpod-volume/models"),
         hf_home=os.getenv("HF_HOME", "/runpod-volume/hf_cache"),
+        birefnet_repo_id=os.getenv("BIREFNET_REPO_ID", "ZhengPeng7/BiRefNet_dynamic-matting"),
+        birefnet_max_side=int(os.getenv("BIREFNET_MAX_SIDE", "2048")),
         pipeline_variant=os.getenv("PIPELINE_VARIANT", "core").lower(),
         controlcom_ckpt=os.getenv(
             "CONTROLCOM_CKPT",

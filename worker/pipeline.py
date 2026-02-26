@@ -50,7 +50,10 @@ def get_models(settings: Settings, *, variant: str) -> Dict[str, Any]:
     if "segmenter" not in _models:
         cache_dir = Path(settings.model_cache_dir)
         logger.info("Loading BiRefNet + ControlCom (cold start)...")
-        _models["segmenter"] = BiRefNetSegmenter(cache_dir / "birefnet")
+        _models["segmenter"] = BiRefNetSegmenter(
+            cache_dir / "birefnet",
+            max_side=settings.birefnet_max_side,
+        )
         _models["harmonizer"] = ControlComHarmonizer(
             repo_dir=Path(settings.controlcom_repo_dir),
             ckpt_path=Path(settings.controlcom_ckpt),

@@ -3,6 +3,7 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import Dict, List
+import json
 
 from huggingface_hub import hf_hub_download, snapshot_download
 
@@ -14,9 +15,37 @@ CONTROL_COM_HF_SOURCES = [
 CONTROL_COM_GDRIVE_ID = "1H5tCPJYRHVTLPzfUKGDxuAHXzp3ZBjGU"
 
 
+def _read_hf_source_marker(marker_path: Path) -> str | None:
+    if not marker_path.exists():
+        return None
+    try:
+        payload = json.loads(marker_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    repo_id = payload.get("repo_id")
+    return repo_id if isinstance(repo_id, str) and repo_id.strip() else None
+
+
+def _write_hf_source_marker(marker_path: Path, repo_id: str) -> None:
+    marker_path.write_text(
+        json.dumps({"repo_id": repo_id}, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
 def _download_hf(repo_id: str, target_dir: Path, hf_cache_dir: Path) -> None:
+    marker_path = target_dir / "source.json"
+    existing_repo = _read_hf_source_marker(marker_path)
+    target_has_files = target_dir.exists() and any(target_dir.iterdir())
+    should_refresh = target_has_files and existing_repo != repo_id
+
+    if should_refresh and target_dir.exists():
+        shutil.rmtree(target_dir)
+
     target_dir.mkdir(parents=True, exist_ok=True)
-    if any(target_dir.iterdir()):
+    if any(target_dir.iterdir()) and existing_repo == repo_id:
         return
 
     hf_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -28,6 +57,7 @@ def _download_hf(repo_id: str, target_dir: Path, hf_cache_dir: Path) -> None:
         resume_download=True,
         ignore_patterns=["*.md", "*.gitattributes"],
     )
+    _write_hf_source_marker(marker_path, repo_id)
 
 
 def _download_controlcom(target_path: Path, hf_cache_dir: Path) -> None:
@@ -91,7 +121,7 @@ def run_download_models(settings: Settings) -> Dict[str, object]:
     variant = "full" if variant == "full" else "core"
 
     # BiRefNet (HuggingFace)
-    _download_hf("ZhengPeng7/BiRefNet", cache / "birefnet", hf_cache)
+    _download_hf(settings.birefnet_repo_id, cache / "birefnet", hf_cache)
     downloaded.append("birefnet")
 
     # ControlCom CLIP (HuggingFace) — must live under controlcom/openai-clip-vit-large-patch14

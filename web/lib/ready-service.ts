@@ -104,6 +104,8 @@ function getTemplateEnv(env: AppEnv): Array<{ key: string; value: string }> {
     { key: "MODEL_CACHE_DIR", value: cacheDir },
     { key: "HF_HOME", value: hfHome },
     { key: "TRANSFORMERS_CACHE", value: hfHome },
+    { key: "BIREFNET_REPO_ID", value: env.BIREFNET_REPO_ID },
+    { key: "BIREFNET_MAX_SIDE", value: String(env.BIREFNET_MAX_SIDE) },
     { key: "LIBCOM_MODEL_DIR", value: `${cacheDir}/libcom` },
     { key: "CONTROLCOM_CKPT", value: `${cacheDir}/controlcom/ControlCom_blend_harm.pth` },
     { key: "CLIP_MODEL_DIR", value: `${cacheDir}/controlcom/openai-clip-vit-large-patch14` },

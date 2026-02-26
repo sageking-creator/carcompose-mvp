@@ -5,17 +5,28 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 import torch
+import torch.nn.functional as F
 from torchvision import transforms
 from transformers import AutoModelForImageSegmentation
 
 from utils.refine import build_hardened_alpha, refine_foreground
 
 
+def compute_inference_size(width: int, height: int, max_side: int) -> tuple[int, int]:
+    limit = max(64, int(max_side))
+    longest_side = max(width, height)
+    if longest_side <= limit:
+        return width, height
+    scale = limit / float(longest_side)
+    return max(1, int(round(width * scale))), max(1, int(round(height * scale)))
+
+
 class BiRefNetSegmenter:
-    def __init__(self, cache_dir: Path):
+    def __init__(self, cache_dir: Path, *, max_side: int = 2048):
         torch.set_float32_matmul_precision("high")
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.max_side = max(64, int(max_side))
         if not cache_dir.exists() or not any(cache_dir.iterdir()):
             raise FileNotFoundError(
                 f"BiRefNet snapshot not found at {cache_dir}. Run `download_models` to populate the volume."
@@ -27,10 +38,11 @@ class BiRefNetSegmenter:
             trust_remote_code=True,
         )
         self.model.to(self.device).eval()
+        if self.device.type == "cuda":
+            self.model.half()
 
         self.transform = transforms.Compose(
             [
-                transforms.Resize((1024, 1024)),
                 transforms.ToTensor(),
                 transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
             ]
@@ -44,9 +56,18 @@ class BiRefNetSegmenter:
           car_rgba_refined: PIL "RGBA" with refined alpha (guided filter).
         """
 
-        orig_size = image.size
+        orig_w, orig_h = image.size
         img_rgb = image.convert("RGB")
-        tensor = self.transform(img_rgb).unsqueeze(0).to(self.device)
+        infer_w, infer_h = compute_inference_size(orig_w, orig_h, self.max_side)
+        infer_image = (
+            img_rgb
+            if (infer_w, infer_h) == (orig_w, orig_h)
+            else img_rgb.resize((infer_w, infer_h), Image.Resampling.LANCZOS)
+        )
+
+        tensor = self.transform(infer_image).unsqueeze(0).to(self.device)
+        if self.device.type == "cuda":
+            tensor = tensor.half()
 
         outputs = self.model(tensor)
         if isinstance(outputs, (tuple, list)):
@@ -54,17 +75,15 @@ class BiRefNetSegmenter:
         else:
             pred = getattr(outputs, "logits", outputs)
 
-        pred = pred.sigmoid().cpu()
-        pred_squeezed = pred[0].squeeze()
+        pred = pred.sigmoid()
+        if pred.ndim == 3:
+            pred = pred.unsqueeze(1)
+        pred = F.interpolate(pred.float(), size=(orig_h, orig_w), mode="bilinear", align_corners=False)
+        pred_squeezed = pred[0].squeeze().cpu()
 
-        prob_1024 = pred_squeezed.numpy().astype(np.float32)
-        prob_pil = Image.fromarray(np.clip(prob_1024 * 255.0, 0.0, 255.0).astype(np.uint8), mode="L")
-        prob_resized = np.array(
-            prob_pil.resize(orig_size, Image.Resampling.BILINEAR),
-            dtype=np.float32,
-        ) / 255.0
+        prob = pred_squeezed.numpy().astype(np.float32)
 
-        alpha, _ = build_hardened_alpha(img_rgb, prob_resized, threshold=0.50, guided_radius=45, guided_eps=1e-4)
+        alpha, _ = build_hardened_alpha(img_rgb, prob)
         mask_pil = Image.fromarray(np.clip(alpha * 255.0, 0.0, 255.0).astype(np.uint8), mode="L")
         car_rgba = refine_foreground(img_rgb, alpha)
         return mask_pil, car_rgba

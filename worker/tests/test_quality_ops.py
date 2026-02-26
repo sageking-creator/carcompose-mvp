@@ -41,6 +41,25 @@ class QualityOpsTests(unittest.TestCase):
         self.assertLessEqual(checks["outsideLeakMeanAlpha"], 0.01)
         self.assertGreater(checks["maskAreaRatio"], 0.05)
 
+    def test_hardened_alpha_rejects_connected_haze(self) -> None:
+        height, width = 300, 420
+        image_np = np.full((height, width, 3), 150, dtype=np.uint8)
+        image = Image.fromarray(image_np, mode="RGB")
+
+        prob = np.zeros((height, width), dtype=np.float32)
+        prob[90:240, 90:280] = 0.93
+        prob[120:135, 280:335] = 0.54
+        prob[60:220, 335:410] = 0.53
+
+        alpha, _ = build_hardened_alpha(image, prob, guided_radius=35, guided_eps=1e-4)
+        mask = Image.fromarray(np.clip(alpha * 255.0, 0.0, 255.0).astype(np.uint8), mode="L")
+        bbox = get_tight_bbox_from_mask(mask)
+        checks = compute_mask_artifact_checks(mask, bbox)
+
+        self.assertLess(bbox[2], 350)
+        self.assertGreaterEqual(checks["interiorOpaqueRatio"], 0.985)
+        self.assertLessEqual(checks["outsideLeakMeanAlpha"], 0.01)
+
     def test_bbox_ignores_low_alpha_tails_and_fails_small_masks(self) -> None:
         mask_np = np.zeros((220, 360), dtype=np.uint8)
         mask_np[50:180, 70:220] = 255

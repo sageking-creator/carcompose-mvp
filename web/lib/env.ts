@@ -35,6 +35,8 @@ const envSchema = z.object({
   PIPELINE_VARIANT: z.enum(["core", "full"]).default("core"),
   MODEL_CACHE_DIR: z.string().default("/runpod-volume/models"),
   HF_HOME: z.string().default("/runpod-volume/hf_cache"),
+  BIREFNET_REPO_ID: z.string().default("ZhengPeng7/BiRefNet_dynamic-matting"),
+  BIREFNET_MAX_SIDE: z.coerce.number().int().positive().default(2048),
   MAX_OUTPUT_LONG_EDGE: z.coerce.number().int().positive().default(2048),
   OUTPUT_RESIZE_MODE: z.enum(["preserve", "stretch"]).default("preserve"),
   CORE_CONTACT_SHADOW_STRENGTH: z.coerce.number().min(0).max(1).default(0.32),
