@@ -18,6 +18,27 @@ export type UploadContentTypes = {
   background: string;
 };
 
+export type CompositeRunpodOptions = {
+  harmonyThreshold: number;
+  shadowStrength: number;
+  reflectionStrength: number;
+};
+
+export type CompositeRunpodInput = {
+  action: "composite";
+  job_id: string;
+  car_image_url: string;
+  background_image_url: string;
+  output_put_url: string;
+  pipeline_variant: "core" | "full";
+  options: {
+    harmony_threshold: number;
+    shadow_strength: number;
+    reflection_strength: number;
+  };
+  debug_put_urls?: Partial<Record<DebugArtifactName, string>>;
+};
+
 export function normalizeContentType(value: string): string {
   return value.toLowerCase().split(";")[0].trim();
 }
@@ -55,6 +76,36 @@ export function debugArtifactEntries(
   return (Object.entries(keys) as Array<[DebugArtifactName, string | undefined]>).filter(
     (entry): entry is [DebugArtifactName, string] => typeof entry[1] === "string" && entry[1].length > 0
   );
+}
+
+export function buildCompositeRunpodInput(args: {
+  jobId: string;
+  carImageUrl: string;
+  backgroundImageUrl: string;
+  outputPutUrl: string;
+  pipelineVariant: "core" | "full";
+  options: CompositeRunpodOptions;
+  debugPutUrls?: Partial<Record<DebugArtifactName, string>>;
+}): CompositeRunpodInput {
+  const payload: CompositeRunpodInput = {
+    action: "composite",
+    job_id: args.jobId,
+    car_image_url: args.carImageUrl,
+    background_image_url: args.backgroundImageUrl,
+    output_put_url: args.outputPutUrl,
+    pipeline_variant: args.pipelineVariant,
+    options: {
+      harmony_threshold: args.options.harmonyThreshold,
+      shadow_strength: args.options.shadowStrength,
+      reflection_strength: args.options.reflectionStrength
+    }
+  };
+
+  if (debugArtifactEntries(args.debugPutUrls).length > 0) {
+    payload.debug_put_urls = args.debugPutUrls;
+  }
+
+  return payload;
 }
 
 export function validateUploadContentTypes(contentTypes: UploadContentTypes): void {

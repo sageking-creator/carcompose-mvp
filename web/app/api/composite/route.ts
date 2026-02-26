@@ -7,7 +7,13 @@ import { ensureReady } from "@/lib/ready-service";
 import { presignGet, presignPut } from "@/lib/r2";
 import { getSetupState, putJobState } from "@/lib/r2-state";
 import { submitRunpodJob } from "@/lib/runpod-jobs";
-import { buildDebugArtifactKeys, buildUploadKeys, DEBUG_ARTIFACT_SPECS, type DebugArtifactName } from "@/lib/uploads";
+import {
+  buildCompositeRunpodInput,
+  buildDebugArtifactKeys,
+  buildUploadKeys,
+  DEBUG_ARTIFACT_SPECS,
+  type DebugArtifactName
+} from "@/lib/uploads";
 
 const requestSchema = z.object({
   jobId: z.string().uuid(),
@@ -63,20 +69,18 @@ export async function POST(request: Request): Promise<NextResponse> {
           : Promise.resolve(undefined)
       ]);
 
-      runpodJobId = await submitRunpodJob(endpointId, {
-        action: "composite",
-        job_id: payload.jobId,
-        car_image_url: carImageUrl,
-        background_image_url: backgroundImageUrl,
-        output_put_url: outputPutUrl,
-        pipeline_variant: env.PIPELINE_VARIANT,
-        options: {
-          harmony_threshold: options.harmonyThreshold,
-          shadow_strength: options.shadowStrength,
-          reflection_strength: options.reflectionStrength
-        },
-        debug_put_urls: debugPutUrls
-      });
+      runpodJobId = await submitRunpodJob(
+        endpointId,
+        buildCompositeRunpodInput({
+          jobId: payload.jobId,
+          carImageUrl,
+          backgroundImageUrl,
+          outputPutUrl,
+          pipelineVariant: env.PIPELINE_VARIANT,
+          options,
+          debugPutUrls
+        })
+      );
       runpodEndpointId = endpointId;
     }
 

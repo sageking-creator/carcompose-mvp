@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  buildCompositeRunpodInput,
   buildDebugArtifactKeys,
   buildUploadKeys,
   debugArtifactEntries,
@@ -46,4 +47,43 @@ test("debugArtifactEntries filters empty artifact keys", () => {
   });
 
   assert.deepEqual(entries, [["mask_png", "debug/job/01-mask.png"]]);
+});
+
+test("buildCompositeRunpodInput omits debug_put_urls when not provided", () => {
+  const payload = buildCompositeRunpodInput({
+    jobId: "job-1",
+    carImageUrl: "https://example.com/car",
+    backgroundImageUrl: "https://example.com/bg",
+    outputPutUrl: "https://example.com/out",
+    pipelineVariant: "core",
+    options: {
+      harmonyThreshold: 0.65,
+      shadowStrength: 0.85,
+      reflectionStrength: 0.6
+    }
+  });
+
+  assert.equal("debug_put_urls" in payload, false);
+});
+
+test("buildCompositeRunpodInput includes debug_put_urls when provided", () => {
+  const payload = buildCompositeRunpodInput({
+    jobId: "job-1",
+    carImageUrl: "https://example.com/car",
+    backgroundImageUrl: "https://example.com/bg",
+    outputPutUrl: "https://example.com/out",
+    pipelineVariant: "core",
+    options: {
+      harmonyThreshold: 0.65,
+      shadowStrength: 0.85,
+      reflectionStrength: 0.6
+    },
+    debugPutUrls: {
+      mask_png: "https://example.com/debug/mask"
+    }
+  });
+
+  assert.deepEqual(payload.debug_put_urls, {
+    mask_png: "https://example.com/debug/mask"
+  });
 });
