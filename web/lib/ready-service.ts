@@ -78,6 +78,8 @@ const AUTOPICK_SECURE_CLOUD = true;
 const AUTOPICK_MAX_DATACENTERS = 25;
 const AUTOPICK_QUEUE_FAILOVER_AFTER_MS = 2 * 60 * 1000;
 const AUTOPICK_QUEUE_FAILOVER_COOLDOWN_MS = 4 * 60 * 1000;
+const STALE_ENDPOINT_DRAIN_RETRIES = 3;
+const STALE_ENDPOINT_DRAIN_WAIT_MS = 2_000;
 const VOLUME_DATACENTER_CANDIDATES = [
   // Prefer serverless-supported US zones first.
   "US-TX-3",
@@ -338,6 +340,10 @@ function buildDatacenterPreferenceList(preferredDatacenterId: string, extra: str
   return ordered;
 }
 
+async function waitMs(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function cleanupStaleCarcomposeEndpoints(params: {
   keepEndpointId?: string;
   keepEndpointName?: string;
@@ -364,18 +370,13 @@ async function cleanupStaleCarcomposeEndpoints(params: {
   });
 
   for (const endpoint of stale) {
+    let hasInProgressJobs = false;
     try {
       const health = await getRunpodHealth(endpoint.id);
-      const workers = health.workers ?? {};
       const jobs = health.jobs ?? {};
-      const runningLikeCount =
-        (workers.running ?? 0) + (workers.ready ?? 0) + (workers.initializing ?? 0);
-      const inProgressCount = jobs.inProgress ?? 0;
-      if (runningLikeCount > 0 || inProgressCount > 0) {
-        continue;
-      }
+      hasInProgressJobs = (jobs.inProgress ?? 0) > 0;
     } catch {
-      // If health fails, attempt deletion anyway (purge/delete are best-effort).
+      // If health fails, continue with best-effort cleanup.
     }
 
     try {
@@ -388,6 +389,31 @@ async function cleanupStaleCarcomposeEndpoints(params: {
       await patchRunpodEndpointRest(endpoint.id, { workersMin: 0, workersMax: 0 });
     } catch {
       // Ignore; deletion may still succeed.
+    }
+
+    if (hasInProgressJobs) {
+      continue;
+    }
+
+    for (let attempt = 0; attempt < STALE_ENDPOINT_DRAIN_RETRIES; attempt += 1) {
+      try {
+        const health = await getRunpodHealth(endpoint.id);
+        const inProgressCount = health.jobs?.inProgress ?? 0;
+        if (inProgressCount <= 0) {
+          hasInProgressJobs = false;
+          break;
+        }
+        hasInProgressJobs = true;
+      } catch {
+        hasInProgressJobs = false;
+        break;
+      }
+
+      await waitMs(STALE_ENDPOINT_DRAIN_WAIT_MS);
+    }
+
+    if (hasInProgressJobs) {
+      continue;
     }
 
     try {
