@@ -50,7 +50,7 @@ test("resolveWorkerImage prefers sha tag when commit sha is available", () => {
     VERCEL_GIT_COMMIT_SHA: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
   } as AppEnv;
   assert.deepEqual(resolveWorkerImage(env), {
-    image: "ghcr.io/sageking-creator/carcompose-mvp-worker:sha-a1b2c3d"
+    image: "ghcr.io/sageking-creator/carcompose-mvp-worker:sha-a1b2c3d4e5f6"
   });
 });
 
@@ -65,4 +65,3 @@ test("resolveWorkerImage falls back to main tag without valid sha", () => {
     image: "ghcr.io/sageking-creator/carcompose-mvp-worker:main"
   });
 });
-

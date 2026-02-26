@@ -157,6 +157,10 @@ export async function resolveGhcrImageToDigest(
 
   const bodyText = await manifestResponse.text();
   if (manifestResponse.status === 404) {
+    if (parsedImage.reference.startsWith("sha-")) {
+      const fallbackImage = `ghcr.io/${parsedImage.repository}:main`;
+      return resolveGhcrImageToDigest(fallbackImage, credentials);
+    }
     throw new Error(
       `Worker image not found in GHCR: ${image}. Build/push the image first or set WORKER_IMAGE correctly.`
     );

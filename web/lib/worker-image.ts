@@ -8,7 +8,7 @@ function getShortCommitSha(value: string | undefined): string | null {
   if (!/^[0-9a-f]{7,40}$/.test(normalized)) {
     return null;
   }
-  return normalized.slice(0, 7);
+  return normalized.slice(0, 12);
 }
 
 export function resolveWorkerImage(env: AppEnv): { image: string | null; reason?: string } {
