@@ -1,4 +1,5 @@
 import { getJson, putJson } from "@/lib/r2";
+import type { DebugArtifactName } from "@/lib/uploads";
 
 export const SETUP_STATE_KEY = "system/setup.json";
 
@@ -32,6 +33,7 @@ export type JobState = {
   };
   output: {
     outputKey: string;
+    debugKeys?: Partial<Record<DebugArtifactName, string>>;
   };
   options: {
     harmonyThreshold: number;

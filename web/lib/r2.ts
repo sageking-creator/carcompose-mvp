@@ -155,6 +155,12 @@ export async function ensureLifecycleRules(bucketName: string): Promise<void> {
             Status: "Enabled",
             Filter: { Prefix: "outputs/" },
             Expiration: { Days: 7 }
+          },
+          {
+            ID: "delete-debug-1d",
+            Status: "Enabled",
+            Filter: { Prefix: "debug/" },
+            Expiration: { Days: 1 }
           }
         ]
       }

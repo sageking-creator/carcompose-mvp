@@ -88,6 +88,22 @@ All API routes require header: `x-carcompose-passcode: <APP_PASSCODE>`.
 - `POST /api/composite`: submits RunPod job and persists job metadata in R2
 - `GET /api/status/{jobId}`: polls RunPod and returns final output URL/status
 
+## Debug loop (artifact-first)
+
+Set `DEBUG_ARTIFACTS=true` in Vercel to persist stage artifacts (`mask`, `placed mask`, `guidance`, `harmonized`, `final`) under `debug/<jobId>/...`.
+
+Then use:
+
+```bash
+bash scripts/fetch-debug-artifacts.sh \
+  --base-url https://YOUR-DEPLOYMENT.vercel.app \
+  --passcode YOUR_APP_PASSCODE \
+  --job-id YOUR_JOB_ID \
+  --wait
+```
+
+This downloads `status.json`, final output, and any debug artifacts into `tmp/debug-jobs/<jobId>/` for repeatable audits.
+
 ## State keys in R2
 
 - `system/setup.json`

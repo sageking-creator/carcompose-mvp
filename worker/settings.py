@@ -25,6 +25,7 @@ class Settings:
     max_edge_halo_mean_delta: float
     max_edge_band_width_px: float
     debug_artifacts: bool
+    worker_build_id: str
 
 
 def _is_truthy(value: str | None) -> bool:
@@ -38,7 +39,7 @@ def get_settings() -> Settings:
     return Settings(
         model_cache_dir=os.getenv("MODEL_CACHE_DIR", "/runpod-volume/models"),
         hf_home=os.getenv("HF_HOME", "/runpod-volume/hf_cache"),
-        birefnet_repo_id=os.getenv("BIREFNET_REPO_ID", "ZhengPeng7/BiRefNet_HR"),
+        birefnet_repo_id=os.getenv("BIREFNET_REPO_ID", "ZhengPeng7/BiRefNet_dynamic-matting"),
         birefnet_infer_res=int(os.getenv("BIREFNET_INFER_RES", "2048")),
         pipeline_variant=os.getenv("PIPELINE_VARIANT", "core").lower(),
         controlcom_ckpt=os.getenv(
@@ -63,4 +64,5 @@ def get_settings() -> Settings:
         max_edge_halo_mean_delta=float(os.getenv("MAX_EDGE_HALO_MEAN_DELTA", "14.0")),
         max_edge_band_width_px=float(os.getenv("MAX_EDGE_BAND_WIDTH_PX", "7.5")),
         debug_artifacts=_is_truthy(os.getenv("DEBUG_ARTIFACTS")),
+        worker_build_id=os.getenv("WORKER_BUILD_ID", "unknown"),
     )

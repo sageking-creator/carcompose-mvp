@@ -40,7 +40,7 @@ test("getEnv applies worker output defaults", () => {
     resetEnvCacheForTests();
 
     const env = getEnv();
-    assert.equal(env.BIREFNET_REPO_ID, "ZhengPeng7/BiRefNet_HR");
+    assert.equal(env.BIREFNET_REPO_ID, "ZhengPeng7/BiRefNet_dynamic-matting");
     assert.equal(env.BIREFNET_INFER_RES, 2048);
     assert.equal(env.MAX_OUTPUT_LONG_EDGE, 2048);
     assert.equal(env.OUTPUT_RESIZE_MODE, "preserve");

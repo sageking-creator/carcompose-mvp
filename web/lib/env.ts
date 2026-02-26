@@ -35,7 +35,7 @@ const envSchema = z.object({
   PIPELINE_VARIANT: z.enum(["core", "full"]).default("core"),
   MODEL_CACHE_DIR: z.string().default("/runpod-volume/models"),
   HF_HOME: z.string().default("/runpod-volume/hf_cache"),
-  BIREFNET_REPO_ID: z.string().default("ZhengPeng7/BiRefNet_HR"),
+  BIREFNET_REPO_ID: z.string().default("ZhengPeng7/BiRefNet_dynamic-matting"),
   BIREFNET_INFER_RES: z.coerce.number().int().refine((value) => value === 1024 || value === 2048, {
     message: "BIREFNET_INFER_RES must be 1024 or 2048"
   }).default(2048),

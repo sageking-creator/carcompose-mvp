@@ -23,7 +23,7 @@ const baseEnv = {
   PIPELINE_VARIANT: "core",
   MODEL_CACHE_DIR: "/runpod-volume/models",
   HF_HOME: "/runpod-volume/hf_cache",
-  BIREFNET_REPO_ID: "ZhengPeng7/BiRefNet_HR",
+  BIREFNET_REPO_ID: "ZhengPeng7/BiRefNet_dynamic-matting",
   BIREFNET_INFER_RES: 2048,
   MAX_OUTPUT_LONG_EDGE: 2048,
   OUTPUT_RESIZE_MODE: "preserve",

@@ -11,9 +11,31 @@ type ReadyResponse = {
 
 type StatusSuccess = {
   status: "success";
+  jobId?: string;
   outputUrl: string;
+  workerBuildId?: string | null;
   harmonyScore?: number;
   quality?: string | null;
+  timings?: Record<string, number>;
+  detailPreservation?: {
+    hfRatio?: number;
+    method?: string;
+    fallbackReason?: string;
+  } | null;
+  artifactChecks?: {
+    interiorOpaqueRatio?: number;
+    outsideLeakMeanAlpha?: number;
+    nearLeakMeanAlpha?: number;
+    nearLeakP95Alpha?: number;
+    maskAreaRatio?: number;
+    edgeHaloMeanDelta?: number;
+    edgeBandWidthPx?: number;
+    protectCoverageRatio?: number;
+    contactShadowApplied?: boolean;
+    glassModeApplied?: "off" | "auto" | "force";
+    studioModeApplied?: "off" | "auto" | "on";
+  } | null;
+  debugUrls?: Record<string, string> | null;
 };
 
 type StatusRejected = {
@@ -71,9 +93,14 @@ export default function HomePage(): JSX.Element {
   const [jobState, setJobState] = useState<"idle" | "uploading" | "processing" | "success" | "rejected" | "error">(
     "idle"
   );
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [resultUrl, setResultUrl] = useState<string | null>(null);
+  const [debugUrls, setDebugUrls] = useState<Record<string, string>>({});
   const [harmonyScore, setHarmonyScore] = useState<number | null>(null);
   const [quality, setQuality] = useState<string | null>(null);
+  const [workerBuildId, setWorkerBuildId] = useState<string | null>(null);
+  const [detailPreservation, setDetailPreservation] = useState<StatusSuccess["detailPreservation"]>(null);
+  const [artifactChecks, setArtifactChecks] = useState<StatusSuccess["artifactChecks"]>(null);
   const [guidance, setGuidance] = useState<string[]>([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -210,9 +237,14 @@ export default function HomePage(): JSX.Element {
     }
 
     setErrorMessage(null);
+    setActiveJobId(null);
     setResultUrl(null);
+    setDebugUrls({});
     setHarmonyScore(null);
     setQuality(null);
+    setWorkerBuildId(null);
+    setDetailPreservation(null);
+    setArtifactChecks(null);
     setGuidance([]);
 
     try {
@@ -245,6 +277,7 @@ export default function HomePage(): JSX.Element {
           }
         })
       });
+      setActiveJobId(submitted.jobId as string);
 
       for (let attempt = 0; attempt < 240; attempt += 1) {
         await new Promise((resolve) => setTimeout(resolve, 3000));
@@ -269,9 +302,14 @@ export default function HomePage(): JSX.Element {
 
         if (status.status === "success") {
           setJobState("success");
+          setActiveJobId(status.jobId ?? (submitted.jobId as string));
           setResultUrl(status.outputUrl);
+          setDebugUrls(status.debugUrls ?? {});
           setHarmonyScore(status.harmonyScore ?? null);
           setQuality(status.quality ?? null);
+          setWorkerBuildId(status.workerBuildId ?? null);
+          setDetailPreservation(status.detailPreservation ?? null);
+          setArtifactChecks(status.artifactChecks ?? null);
           return;
         }
       }
@@ -351,14 +389,29 @@ export default function HomePage(): JSX.Element {
         </button>
 
         {jobState === "processing" && (
-          <p className="mt-3 text-sm text-black/70">Processing. Waiting for real pipeline status...</p>
+          <p className="mt-3 text-sm text-black/70">
+            Processing. Waiting for real pipeline status... {activeJobId ? `(${activeJobId})` : ""}
+          </p>
         )}
 
         {jobState === "success" && resultUrl && (
           <div className="mt-4 rounded-xl border border-green-700/30 bg-green-50 p-4">
             <p className="text-sm font-semibold uppercase tracking-wide text-green-900">Completed</p>
+            {activeJobId && <p className="mt-2 text-sm text-green-900">Job ID: {activeJobId}</p>}
+            {workerBuildId && <p className="text-sm text-green-900">Worker build: {workerBuildId}</p>}
             <p className="mt-2 text-sm text-green-900">Harmony score: {harmonyScore ?? "n/a"}</p>
             <p className="text-sm text-green-900">Quality: {quality ?? "n/a"}</p>
+            {detailPreservation && (
+              <p className="text-sm text-green-900">
+                Detail preservation: {detailPreservation.hfRatio ?? "n/a"} ({detailPreservation.method ?? "n/a"})
+              </p>
+            )}
+            {artifactChecks && (
+              <p className="text-sm text-green-900">
+                Mask checks: interior {artifactChecks.interiorOpaqueRatio ?? "n/a"}, outside leak{" "}
+                {artifactChecks.outsideLeakMeanAlpha ?? "n/a"}, edge halo {artifactChecks.edgeHaloMeanDelta ?? "n/a"}
+              </p>
+            )}
             <a
               href={resultUrl}
               target="_blank"
@@ -367,6 +420,24 @@ export default function HomePage(): JSX.Element {
             >
               Download Composite
             </a>
+            {Object.keys(debugUrls).length > 0 && (
+              <div className="mt-3">
+                <p className="text-sm font-semibold text-green-900">Debug Artifacts</p>
+                <div className="mt-1 flex flex-wrap gap-2">
+                  {Object.entries(debugUrls).map(([name, url]) => (
+                    <a
+                      key={name}
+                      href={url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="rounded-md bg-white px-3 py-1 text-xs font-semibold text-green-900 ring-1 ring-green-800/20"
+                    >
+                      {name}
+                    </a>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
 

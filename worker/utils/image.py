@@ -22,6 +22,22 @@ def upload_image_put(url: str, image: Image.Image, quality: int = 97) -> None:
     response.raise_for_status()
 
 
+def upload_debug_image_put(url: str, image: Image.Image, content_type: str) -> None:
+    normalized = content_type.strip().lower()
+    output = BytesIO()
+
+    if normalized == "image/png":
+        image.save(output, format="PNG")
+    elif normalized == "image/jpeg":
+        image.convert("RGB").save(output, format="JPEG", quality=96, subsampling=0, optimize=True)
+    else:
+        raise ValueError(f"Unsupported debug content type: {content_type}")
+
+    output.seek(0)
+    response = requests.put(url, data=output.read(), headers={"Content-Type": normalized}, timeout=120)
+    response.raise_for_status()
+
+
 
 def validate_image(image: Image.Image, name: str, max_pixels: int) -> None:
     width, height = image.size

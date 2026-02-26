@@ -31,6 +31,18 @@ def compute_square_padding(width: int, height: int, target_side: int) -> tuple[i
     return left, top, right, bottom
 
 
+def compute_multiple_padding(width: int, height: int, multiple: int) -> tuple[int, int, int, int]:
+    target_w = int(np.ceil(width / multiple) * multiple)
+    target_h = int(np.ceil(height / multiple) * multiple)
+    pad_w = max(0, target_w - width)
+    pad_h = max(0, target_h - height)
+    left = pad_w // 2
+    right = pad_w - left
+    top = pad_h // 2
+    bottom = pad_h - top
+    return left, top, right, bottom
+
+
 def _pad_reflect_square(image_np: np.ndarray, target_side: int) -> tuple[np.ndarray, tuple[int, int, int, int]]:
     height, width = image_np.shape[:2]
     left, top, right, bottom = compute_square_padding(width, height, target_side)
@@ -46,8 +58,26 @@ def _pad_reflect_square(image_np: np.ndarray, target_side: int) -> tuple[np.ndar
     return padded, (left, top, right, bottom)
 
 
+def _pad_reflect_multiple(
+    image_np: np.ndarray,
+    multiple: int = 32,
+) -> tuple[np.ndarray, tuple[int, int, int, int]]:
+    height, width = image_np.shape[:2]
+    left, top, right, bottom = compute_multiple_padding(width, height, multiple)
+    if left == 0 and top == 0 and right == 0 and bottom == 0:
+        return image_np, (left, top, right, bottom)
+
+    pad_mode = "reflect" if min(height, width) > 1 else "edge"
+    padded = np.pad(
+        image_np,
+        ((top, bottom), (left, right), (0, 0)),
+        mode=pad_mode,
+    )
+    return padded, (left, top, right, bottom)
+
+
 class BiRefNetSegmenter:
-    def __init__(self, cache_dir: Path, *, infer_res: int = 2048):
+    def __init__(self, cache_dir: Path, *, infer_res: int = 2048, repo_id: str = ""):
         torch.set_float32_matmul_precision("high")
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -55,6 +85,8 @@ class BiRefNetSegmenter:
         if requested_res not in {1024, 2048}:
             requested_res = 2048 if requested_res > 1024 else 1024
         self.infer_res = requested_res
+        self.repo_id = repo_id
+        self.is_dynamic_matte = "dynamic" in repo_id.lower()
         if not cache_dir.exists() or not any(cache_dir.iterdir()):
             raise FileNotFoundError(
                 f"BiRefNet snapshot not found at {cache_dir}. Run `download_models` to populate the volume."
@@ -77,7 +109,7 @@ class BiRefNetSegmenter:
         )
 
     @torch.inference_mode()
-    def segment(self, image: Image.Image) -> tuple[Image.Image, Image.Image]:
+    def segment(self, image: Image.Image, *, alpha_mode: str = "auto") -> tuple[Image.Image, Image.Image]:
         """
         Returns:
           car_mask:         PIL "L" mask, same size as input. 255=car, 0=bg.
@@ -93,10 +125,18 @@ class BiRefNetSegmenter:
         )
 
         infer_np = np.array(infer_image, dtype=np.uint8)
-        padded_np, (pad_left, pad_top, pad_right, pad_bottom) = _pad_reflect_square(
-            infer_np,
-            self.infer_res,
-        )
+        if self.is_dynamic_matte:
+            padded_np, (pad_left, pad_top, pad_right, pad_bottom) = _pad_reflect_multiple(
+                infer_np,
+                multiple=32,
+            )
+            target_h, target_w = padded_np.shape[:2]
+        else:
+            padded_np, (pad_left, pad_top, pad_right, pad_bottom) = _pad_reflect_square(
+                infer_np,
+                self.infer_res,
+            )
+            target_h, target_w = self.infer_res, self.infer_res
         padded_image = Image.fromarray(padded_np, mode="RGB")
 
         tensor = self.transform(padded_image).unsqueeze(0).to(self.device)
@@ -112,18 +152,18 @@ class BiRefNetSegmenter:
         pred = pred.sigmoid()
         if pred.ndim == 3:
             pred = pred.unsqueeze(1)
-        if tuple(pred.shape[-2:]) != (self.infer_res, self.infer_res):
-            pred = F.interpolate(pred.float(), size=(self.infer_res, self.infer_res), mode="bilinear", align_corners=False)
+        if tuple(pred.shape[-2:]) != (target_h, target_w):
+            pred = F.interpolate(pred.float(), size=(target_h, target_w), mode="bilinear", align_corners=False)
 
-        h_end = self.infer_res - pad_bottom if pad_bottom > 0 else self.infer_res
-        w_end = self.infer_res - pad_right if pad_right > 0 else self.infer_res
+        h_end = target_h - pad_bottom if pad_bottom > 0 else target_h
+        w_end = target_w - pad_right if pad_right > 0 else target_w
         pred = pred[..., pad_top:h_end, pad_left:w_end]
         pred = F.interpolate(pred.float(), size=(orig_h, orig_w), mode="bilinear", align_corners=False)
         pred_squeezed = pred[0].squeeze().cpu()
 
         prob = pred_squeezed.numpy().astype(np.float32)
 
-        alpha, _ = build_hardened_alpha(img_rgb, prob)
+        alpha, _ = build_hardened_alpha(img_rgb, prob, mode=alpha_mode)
         mask_pil = Image.fromarray(np.clip(alpha * 255.0, 0.0, 255.0).astype(np.uint8), mode="L")
         car_rgba = refine_foreground(img_rgb, alpha)
         return mask_pil, car_rgba

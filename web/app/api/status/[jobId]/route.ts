@@ -7,6 +7,7 @@ import { ensureReady } from "@/lib/ready-service";
 import { presignGet, presignPut } from "@/lib/r2";
 import { getJobState, getSetupState, patchJobState } from "@/lib/r2-state";
 import { getRunpodJobStatus, submitRunpodJob } from "@/lib/runpod-jobs";
+import { DEBUG_ARTIFACT_SPECS, type DebugArtifactName } from "@/lib/uploads";
 
 const paramsSchema = z.object({
   jobId: z.string().uuid()
@@ -14,6 +15,7 @@ const paramsSchema = z.object({
 
 type WorkerSuccessOutput = {
   status: "success";
+  workerBuildId?: string;
   harmonyScore?: number;
   timings?: Record<string, number>;
   variant?: "core" | "full";
@@ -37,6 +39,20 @@ type WorkerSuccessOutput = {
     studioModeApplied?: "off" | "auto" | "on";
   };
 };
+
+type DebugUrls = Partial<Record<DebugArtifactName, string>>;
+
+function debugEntries(
+  keys?: Partial<Record<DebugArtifactName, string>>
+): Array<[DebugArtifactName, string]> {
+  if (!keys) {
+    return [];
+  }
+
+  return (Object.entries(keys) as Array<[DebugArtifactName, string | undefined]>).filter(
+    (entry): entry is [DebugArtifactName, string] => typeof entry[1] === "string" && entry[1].length > 0
+  );
+}
 
 type WorkerRejectedOutput = {
   status: "rejected";
@@ -88,10 +104,20 @@ export async function GET(
         return NextResponse.json({ status: "processing" });
       }
 
-      const [carImageUrl, backgroundImageUrl, outputPutUrl] = await Promise.all([
+      const [carImageUrl, backgroundImageUrl, outputPutUrl, debugPutUrls] = await Promise.all([
         presignGet(job.input.carKey, 3600),
         presignGet(job.input.backgroundKey, 3600),
-        presignPut(job.output.outputKey, "image/jpeg", 3600)
+        presignPut(job.output.outputKey, "image/jpeg", 3600),
+        debugEntries(job.output.debugKeys).length > 0
+          ? Promise.all(
+              debugEntries(job.output.debugKeys).map(
+                async ([artifactName, key]): Promise<[DebugArtifactName, string]> => [
+                  artifactName,
+                  await presignPut(key, DEBUG_ARTIFACT_SPECS[artifactName].contentType, 3600)
+                ]
+              )
+            ).then((entries) => Object.fromEntries(entries) as DebugUrls)
+          : Promise.resolve(undefined)
       ]);
 
       const submittedRunpodJobId = await submitRunpodJob(setup.runpodEndpointId, {
@@ -105,7 +131,8 @@ export async function GET(
           harmony_threshold: job.options.harmonyThreshold,
           shadow_strength: job.options.shadowStrength,
           reflection_strength: job.options.reflectionStrength
-        }
+        },
+        debug_put_urls: debugPutUrls
       });
 
       const patched = await patchJobState(jobId, {
@@ -173,17 +200,32 @@ export async function GET(
     }
 
     const success = output as WorkerSuccessOutput;
-    const outputUrl = await presignGet(job.output.outputKey, 60 * 60 * 24);
+    const [outputUrl, debugUrls] = await Promise.all([
+      presignGet(job.output.outputKey, 60 * 60 * 24),
+      debugEntries(job.output.debugKeys).length > 0
+        ? Promise.all(
+            debugEntries(job.output.debugKeys).map(
+              async ([artifactName, key]): Promise<[DebugArtifactName, string]> => [
+                artifactName,
+                await presignGet(key, 60 * 60 * 24)
+              ]
+            )
+          ).then((entries) => Object.fromEntries(entries) as DebugUrls)
+        : Promise.resolve(undefined)
+    ]);
 
     return NextResponse.json({
       status: "success",
+      jobId: job.jobId,
       outputUrl,
+      workerBuildId: success.workerBuildId ?? null,
       harmonyScore: success.harmonyScore,
       timings: success.timings ?? {},
       variant: success.variant ?? job.variant,
       quality: success.quality ?? null,
       detailPreservation: success.detailPreservation ?? null,
-      artifactChecks: success.artifactChecks ?? null
+      artifactChecks: success.artifactChecks ?? null,
+      debugUrls: debugUrls ?? null
     });
   } catch (error) {
     return jsonError(error, 400);

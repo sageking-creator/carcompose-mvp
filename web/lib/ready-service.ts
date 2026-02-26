@@ -112,6 +112,7 @@ function getTemplateEnv(env: AppEnv): Array<{ key: string; value: string }> {
     { key: "CUDA_VISIBLE_DEVICES", value: "0" },
     { key: "PYTORCH_CUDA_ALLOC_CONF", value: "max_split_size_mb:512" },
     { key: "PIPELINE_VARIANT", value: env.PIPELINE_VARIANT },
+    { key: "WORKER_BUILD_ID", value: env.VERCEL_GIT_COMMIT_SHA ?? "unknown" },
     { key: "MAX_OUTPUT_LONG_EDGE", value: String(env.MAX_OUTPUT_LONG_EDGE) },
     { key: "OUTPUT_RESIZE_MODE", value: env.OUTPUT_RESIZE_MODE },
     { key: "CORE_CONTACT_SHADOW_STRENGTH", value: String(env.CORE_CONTACT_SHADOW_STRENGTH) },

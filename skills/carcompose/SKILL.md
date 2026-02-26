@@ -1,6 +1,6 @@
 ---
 name: carcompose
-description: Workflow + invariants for the CarCompose repo (Next.js/Vercel orchestrator + R2 state + RunPod serverless GPU worker). Use when implementing provisioning (/api/ready), R2 presigning, RunPod jobs, or the worker ML pipeline.
+description: Workflow + invariants for CarCompose (Vercel orchestrator + R2 state + RunPod serverless GPU worker) with quality-hardening and debug-first diagnostics.
 ---
 
 # CarCompose (MVP) — working rules
@@ -27,11 +27,13 @@ description: Workflow + invariants for the CarCompose repo (Next.js/Vercel orche
 - **No Upstash/BullMQ**: RunPod provides queueing/status; job state is stored in R2 JSON.
 - **No worker storage creds**: worker only uses **presigned GET/PUT** URLs from job input.
 - **No fake progress bars**: UI only shows readiness + RunPod job status.
+- **No silent quality regressions**: low-quality masks or halo-heavy harmonization must trigger deterministic fallback or explicit error.
 
 ## Provisioning workflow (web)
 
 1. `/api/ready` calls `ensureReady()` which:
    - Ensures R2 bucket + lifecycle.
+   - Selects a viable RunPod datacenter+GPU placement (autopick/failover).
    - Ensures RunPod volume, template, endpoint.
    - Starts (or monitors) a single `download_models` init job until it completes.
 2. Provisioning state lives in R2 at `system/setup.json` via `/Users/Hikmet.Erdil/Documents/autobot/web/lib/r2-state.ts`.
@@ -70,12 +72,24 @@ description: Workflow + invariants for the CarCompose repo (Next.js/Vercel orche
 
 - Core pipeline: `BiRefNet → ControlCom`
 - Full pipeline (only if `PIPELINE_VARIANT=full`): `→ GPSDiffusion shadow → reflection → BargainNet QC`
+- Quality controls:
+  - hardened alpha + leak checks
+  - detail preservation + edge halo checks
+  - deterministic luminance-transfer fallback when guidance quality is poor
 - Output contract:
   - `{"status":"success", ...}` or `{"status":"rejected", ...}` or `{"status":"error", ...}`
+
+### Debugging policy
+
+- Keep stage-level diagnostics available (mask placement, harmonization, artifact checks).
+- Debug outputs should be retrievable outside the worker runtime so failures can be audited after job completion.
+- Maintain a repeatable loop: enable debug -> run job -> inspect `/api/status/:jobId` debug URLs -> tune -> rerun.
+- Preserve remote debug upload contract (`debug_put_urls`) so worker failures are diagnosable without attaching to pods.
 
 ## When editing the pipeline
 
 - Keep worker **idempotent** and side-effect free aside from uploading to `output_put_url`.
+- Preserve identity details (logos, plates, trim) as a hard requirement while harmonizing.
 - If you add/change required worker env vars:
   - Update `getTemplateEnv()` in `/Users/Hikmet.Erdil/Documents/autobot/web/lib/ready-service.ts`
   - Ensure the provisioning hash input includes the change (so a new template/endpoint is created).
@@ -83,4 +97,3 @@ description: Workflow + invariants for the CarCompose repo (Next.js/Vercel orche
 ## References
 
 - Pipeline blueprint/spec: `/Users/Hikmet.Erdil/Documents/autobot/car-composite-architecture.md`
-

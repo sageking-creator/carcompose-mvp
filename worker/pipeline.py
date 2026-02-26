@@ -19,6 +19,7 @@ from utils.image import (
     download_image,
     fit_background,
     generate_reshoot_guidance,
+    upload_debug_image_put,
     upload_image_put,
     validate_image,
 )
@@ -39,6 +40,15 @@ from utils.image_ops import (
 )
 
 _models: Dict[str, Any] = {}
+_DEBUG_ARTIFACT_CONTENT_TYPES: dict[str, str] = {
+    "mask_png": "image/png",
+    "foreground_rgba_png": "image/png",
+    "placed_mask_png": "image/png",
+    "composite_raw_jpg": "image/jpeg",
+    "controlcom_guidance_jpg": "image/jpeg",
+    "harmonized_jpg": "image/jpeg",
+    "final_jpg": "image/jpeg",
+}
 
 
 def _now_s() -> float:
@@ -47,6 +57,17 @@ def _now_s() -> float:
 
 def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
+
+
+def _mask_checks_are_bad(checks: dict[str, float]) -> bool:
+    return (
+        checks["maskAreaRatio"] < 0.005
+        or checks["maskAreaRatio"] > 0.85
+        or checks["interiorOpaqueRatio"] < 0.985
+        or checks["outsideLeakMeanAlpha"] > 0.01
+        or checks["nearLeakMeanAlpha"] > 0.02
+        or checks["nearLeakP95Alpha"] > 0.12
+    )
 
 
 def _maybe_dump_debug_image(settings: Settings, job_id: str, name: str, image: Image.Image) -> None:
@@ -65,6 +86,30 @@ def _maybe_dump_debug_image(settings: Settings, job_id: str, name: str, image: I
         logger.warning(f"[{job_id}] Failed to write debug artifact '{name}': {error}")
 
 
+def _emit_debug_artifact(
+    *,
+    settings: Settings,
+    job_id: str,
+    local_name: str,
+    remote_key: str,
+    image: Image.Image,
+    debug_put_urls: dict[str, str],
+) -> None:
+    _maybe_dump_debug_image(settings, job_id, local_name, image)
+    put_url = debug_put_urls.get(remote_key)
+    if not put_url:
+        return
+
+    content_type = _DEBUG_ARTIFACT_CONTENT_TYPES.get(remote_key)
+    if not content_type:
+        return
+
+    try:
+        upload_debug_image_put(put_url, image, content_type)
+    except Exception as error:
+        logger.warning(f"[{job_id}] Failed to upload debug artifact '{remote_key}': {error}")
+
+
 def get_models(settings: Settings, *, variant: str) -> Dict[str, Any]:
     global _models
 
@@ -74,6 +119,7 @@ def get_models(settings: Settings, *, variant: str) -> Dict[str, Any]:
         _models["segmenter"] = BiRefNetSegmenter(
             cache_dir / "birefnet",
             infer_res=settings.birefnet_infer_res,
+            repo_id=settings.birefnet_repo_id,
         )
         _models["harmonizer"] = ControlComHarmonizer(
             repo_dir=Path(settings.controlcom_repo_dir),
@@ -161,6 +207,12 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
     requested_variant = str(payload.get("pipeline_variant") or "").lower()
     env_variant = (settings.pipeline_variant or "core").lower()
     variant = "full" if requested_variant == "full" and env_variant == "full" else "core"
+    debug_put_urls_input = payload.get("debug_put_urls")
+    debug_put_urls: dict[str, str] = {}
+    if isinstance(debug_put_urls_input, dict):
+        for key, value in debug_put_urls_input.items():
+            if isinstance(key, str) and isinstance(value, str) and value.strip():
+                debug_put_urls[key] = value
 
     models = get_models(settings, variant=variant)
     timings: Dict[str, float] = {}
@@ -182,27 +234,72 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
 
     logger.info(f"[{job_id}] Step 1: BiRefNet segmentation + edge refinement...")
     t0 = _now_s()
-    car_mask, car_rgba_refined = models["segmenter"].segment(car_image)
+    car_mask, car_rgba_refined = models["segmenter"].segment(car_image, alpha_mode="auto")
+    source_bbox = get_tight_bbox_from_mask(car_mask)
+    source_checks = compute_mask_artifact_checks(car_mask, source_bbox)
+    if _mask_checks_are_bad(source_checks):
+        logger.warning(
+            f"[{job_id}] Source mask quality is weak "
+            f"(interior={source_checks['interiorOpaqueRatio']:.4f}, "
+            f"outside={source_checks['outsideLeakMeanAlpha']:.4f}, "
+            f"near={source_checks['nearLeakMeanAlpha']:.4f}, "
+            f"area={source_checks['maskAreaRatio']:.4f}); retrying strict alpha mode."
+        )
+        car_mask, car_rgba_refined = models["segmenter"].segment(car_image, alpha_mode="strict")
+        source_bbox = get_tight_bbox_from_mask(car_mask)
+        source_checks = compute_mask_artifact_checks(car_mask, source_bbox)
+        if _mask_checks_are_bad(source_checks):
+            raise InvalidInputError(
+                "car",
+                (
+                    "Mask quality failed after strict retry "
+                    f"(interior={source_checks['interiorOpaqueRatio']:.4f}, "
+                    f"outside={source_checks['outsideLeakMeanAlpha']:.4f}, "
+                    f"near={source_checks['nearLeakMeanAlpha']:.4f}, "
+                    f"area={source_checks['maskAreaRatio']:.4f})."
+                ),
+            )
     timings["segmentation_s"] = round(_now_s() - t0, 3)
-    _maybe_dump_debug_image(settings, job_id, "01_mask", car_mask)
-    _maybe_dump_debug_image(settings, job_id, "02_foreground_rgba", car_rgba_refined)
+    _emit_debug_artifact(
+        settings=settings,
+        job_id=job_id,
+        local_name="01_mask",
+        remote_key="mask_png",
+        image=car_mask,
+        debug_put_urls=debug_put_urls,
+    )
+    _emit_debug_artifact(
+        settings=settings,
+        job_id=job_id,
+        local_name="02_foreground_rgba",
+        remote_key="foreground_rgba_png",
+        image=car_rgba_refined,
+        debug_put_urls=debug_put_urls,
+    )
 
-    tight_bbox = get_tight_bbox_from_mask(car_mask)
+    tight_bbox = source_bbox
     composite_raw, placement_bbox, placed_mask, placed_foreground_rgb = place_car_on_background(
         car_rgba_refined=car_rgba_refined, tight_bbox=tight_bbox, bg_image=bg_proc
     )
-    _maybe_dump_debug_image(settings, job_id, "03_composite_raw", composite_raw)
-    _maybe_dump_debug_image(settings, job_id, "04_placed_mask", placed_mask)
+    _emit_debug_artifact(
+        settings=settings,
+        job_id=job_id,
+        local_name="03_composite_raw",
+        remote_key="composite_raw_jpg",
+        image=composite_raw,
+        debug_put_urls=debug_put_urls,
+    )
+    _emit_debug_artifact(
+        settings=settings,
+        job_id=job_id,
+        local_name="04_placed_mask",
+        remote_key="placed_mask_png",
+        image=placed_mask,
+        debug_put_urls=debug_put_urls,
+    )
     foreground_mask = paste_mask_into_background(bg_proc.size, placement_bbox, placed_mask)
     mask_checks = compute_mask_artifact_checks(foreground_mask, placement_bbox)
-    mask_quality_bad = (
-        mask_checks["maskAreaRatio"] < 0.005
-        or mask_checks["maskAreaRatio"] > 0.85
-        or mask_checks["interiorOpaqueRatio"] < 0.985
-        or mask_checks["outsideLeakMeanAlpha"] > 0.01
-        or mask_checks["nearLeakMeanAlpha"] > 0.02
-        or mask_checks["nearLeakP95Alpha"] > 0.12
-    )
+    mask_quality_bad = _mask_checks_are_bad(mask_checks)
 
     logger.info(f"[{job_id}] Step 2: ControlCom harmonization...")
     t0 = _now_s()
@@ -233,7 +330,14 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
                 fg_mask_crop=placed_mask,
                 placement_bbox=placement_bbox,
             )
-            _maybe_dump_debug_image(settings, job_id, "05_controlcom_guidance", composite_guidance)
+            _emit_debug_artifact(
+                settings=settings,
+                job_id=job_id,
+                local_name="05_controlcom_guidance",
+                remote_key="controlcom_guidance_jpg",
+                image=composite_guidance,
+                debug_put_urls=debug_put_urls,
+            )
             composite_harmonized, harmonization_diag = apply_multiband_harmonization(
                 original_composite=composite_raw,
                 harmonized_guidance=composite_guidance,
@@ -311,7 +415,14 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
         )
 
     timings["harmonization_s"] = round(_now_s() - t0, 3)
-    _maybe_dump_debug_image(settings, job_id, "06_harmonized", composite_harmonized)
+    _emit_debug_artifact(
+        settings=settings,
+        job_id=job_id,
+        local_name="06_harmonized",
+        remote_key="harmonized_jpg",
+        image=composite_harmonized,
+        debug_put_urls=debug_put_urls,
+    )
 
     final = composite_harmonized
     harmony_score: float | None = None
@@ -420,7 +531,14 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
         "glassModeApplied": glass_mode_applied,
         "studioModeApplied": studio_mode_applied,
     }
-    _maybe_dump_debug_image(settings, job_id, "07_final", final)
+    _emit_debug_artifact(
+        settings=settings,
+        job_id=job_id,
+        local_name="07_final",
+        remote_key="final_jpg",
+        image=final,
+        debug_put_urls=debug_put_urls,
+    )
 
     logger.info(f"[{job_id}] Uploading output...")
     t0 = _now_s()
@@ -436,6 +554,7 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
         "timings": timings,
         "total_processing_s": total,
         "artifactChecks": artifact_checks,
+        "workerBuildId": settings.worker_build_id,
     }
 
     if harmony_score is not None:
