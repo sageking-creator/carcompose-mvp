@@ -24,14 +24,12 @@ from utils.refine import build_hardened_alpha
 
 class QualityOpsTests(unittest.TestCase):
     @staticmethod
-    def _mask_checks_are_bad(checks: dict[str, float]) -> bool:
+    def _source_gate_fails(checks: dict[str, float]) -> bool:
         return (
             checks["maskAreaRatio"] < 0.005
             or checks["maskAreaRatio"] > 0.85
             or checks["interiorOpaqueRatio"] < 0.985
             or checks["outsideLeakMeanAlpha"] > 0.01
-            or checks["nearLeakMeanAlpha"] > 0.02
-            or checks["nearLeakP95Alpha"] > 0.12
         )
 
     def test_hardened_alpha_is_opaque_and_low_leak(self) -> None:
@@ -88,7 +86,17 @@ class QualityOpsTests(unittest.TestCase):
         self.assertGreater(checks["maskAreaRatio"], 0.01)
         self.assertGreaterEqual(checks["interiorOpaqueRatio"], 0.985)
         self.assertLessEqual(checks["outsideLeakMeanAlpha"], 0.01)
-        self.assertFalse(self._mask_checks_are_bad(checks))
+        self.assertFalse(self._source_gate_fails(checks))
+
+    def test_source_gate_tolerates_near_leak_when_core_is_clean(self) -> None:
+        checks = {
+            "maskAreaRatio": 0.4068,
+            "interiorOpaqueRatio": 1.0,
+            "outsideLeakMeanAlpha": 0.0,
+            "nearLeakMeanAlpha": 0.0803,
+            "nearLeakP95Alpha": 0.22,
+        }
+        self.assertFalse(self._source_gate_fails(checks))
 
     def test_bbox_ignores_low_alpha_tails_and_fails_small_masks(self) -> None:
         mask_np = np.zeros((220, 360), dtype=np.uint8)

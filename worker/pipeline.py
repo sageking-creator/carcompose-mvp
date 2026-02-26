@@ -59,12 +59,18 @@ def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
 
 
-def _mask_checks_are_bad(checks: dict[str, float]) -> bool:
+def _mask_checks_source_fail(checks: dict[str, float]) -> bool:
     return (
         checks["maskAreaRatio"] < 0.005
         or checks["maskAreaRatio"] > 0.85
         or checks["interiorOpaqueRatio"] < 0.985
         or checks["outsideLeakMeanAlpha"] > 0.01
+    )
+
+
+def _mask_checks_guidance_risky(checks: dict[str, float]) -> bool:
+    return (
+        _mask_checks_source_fail(checks)
         or checks["nearLeakMeanAlpha"] > 0.02
         or checks["nearLeakP95Alpha"] > 0.12
     )
@@ -237,7 +243,7 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
     car_mask, car_rgba_refined = models["segmenter"].segment(car_image, alpha_mode="auto")
     source_bbox = get_tight_bbox_from_mask(car_mask)
     source_checks = compute_mask_artifact_checks(car_mask, source_bbox)
-    if _mask_checks_are_bad(source_checks):
+    if _mask_checks_source_fail(source_checks):
         logger.warning(
             f"[{job_id}] Source mask quality is weak "
             f"(interior={source_checks['interiorOpaqueRatio']:.4f}, "
@@ -248,7 +254,7 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
         car_mask, car_rgba_refined = models["segmenter"].segment(car_image, alpha_mode="strict")
         source_bbox = get_tight_bbox_from_mask(car_mask)
         source_checks = compute_mask_artifact_checks(car_mask, source_bbox)
-        if _mask_checks_are_bad(source_checks):
+        if _mask_checks_source_fail(source_checks):
             raise InvalidInputError(
                 "car",
                 (
@@ -299,7 +305,7 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
     )
     foreground_mask = paste_mask_into_background(bg_proc.size, placement_bbox, placed_mask)
     mask_checks = compute_mask_artifact_checks(foreground_mask, placement_bbox)
-    mask_quality_bad = _mask_checks_are_bad(mask_checks)
+    mask_quality_bad = _mask_checks_guidance_risky(mask_checks)
 
     logger.info(f"[{job_id}] Step 2: ControlCom harmonization...")
     t0 = _now_s()
