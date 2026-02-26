@@ -27,8 +27,12 @@ type WorkerSuccessOutput = {
     interiorOpaqueRatio?: number;
     outsideLeakMeanAlpha?: number;
     maskAreaRatio?: number;
+    edgeHaloMeanDelta?: number;
+    edgeBandWidthPx?: number;
+    protectCoverageRatio?: number;
     contactShadowApplied?: boolean;
     glassModeApplied?: "off" | "auto" | "force";
+    studioModeApplied?: "off" | "auto" | "on";
   };
 };
 

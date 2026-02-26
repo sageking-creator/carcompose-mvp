@@ -105,7 +105,7 @@ function getTemplateEnv(env: AppEnv): Array<{ key: string; value: string }> {
     { key: "HF_HOME", value: hfHome },
     { key: "TRANSFORMERS_CACHE", value: hfHome },
     { key: "BIREFNET_REPO_ID", value: env.BIREFNET_REPO_ID },
-    { key: "BIREFNET_MAX_SIDE", value: String(env.BIREFNET_MAX_SIDE) },
+    { key: "BIREFNET_INFER_RES", value: String(env.BIREFNET_INFER_RES) },
     { key: "LIBCOM_MODEL_DIR", value: `${cacheDir}/libcom` },
     { key: "CONTROLCOM_CKPT", value: `${cacheDir}/controlcom/ControlCom_blend_harm.pth` },
     { key: "CLIP_MODEL_DIR", value: `${cacheDir}/controlcom/openai-clip-vit-large-patch14` },
@@ -115,7 +115,9 @@ function getTemplateEnv(env: AppEnv): Array<{ key: string; value: string }> {
     { key: "MAX_OUTPUT_LONG_EDGE", value: String(env.MAX_OUTPUT_LONG_EDGE) },
     { key: "OUTPUT_RESIZE_MODE", value: env.OUTPUT_RESIZE_MODE },
     { key: "CORE_CONTACT_SHADOW_STRENGTH", value: String(env.CORE_CONTACT_SHADOW_STRENGTH) },
-    { key: "GLASS_NORMALIZATION_MODE", value: env.GLASS_NORMALIZATION_MODE }
+    { key: "CONTACT_SHADOW_MODE", value: env.CONTACT_SHADOW_MODE },
+    { key: "GLASS_NORMALIZATION_MODE", value: env.GLASS_NORMALIZATION_MODE },
+    { key: "STUDIO_MODE", value: env.STUDIO_MODE }
   ];
 }
 

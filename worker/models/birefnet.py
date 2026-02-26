@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import re
 
 import numpy as np
 from PIL import Image
@@ -13,12 +12,8 @@ from transformers import AutoModelForImageSegmentation
 from utils.refine import build_hardened_alpha, refine_foreground
 
 
-GRID_FACTOR_H = 32
-GRID_FACTOR_W = 32
-
-
-def compute_inference_size(width: int, height: int, max_side: int) -> tuple[int, int]:
-    limit = max(64, int(max_side))
+def compute_inference_size(width: int, height: int, target_side: int) -> tuple[int, int]:
+    limit = max(64, int(target_side))
     longest_side = max(width, height)
     if longest_side <= limit:
         return width, height
@@ -26,54 +21,40 @@ def compute_inference_size(width: int, height: int, max_side: int) -> tuple[int,
     return max(1, int(round(width * scale))), max(1, int(round(height * scale)))
 
 
-def compute_grid_padding(height: int, width: int, grid_h: int = GRID_FACTOR_H, grid_w: int = GRID_FACTOR_W) -> tuple[int, int]:
-    pad_h = (int(grid_h) - (int(height) % int(grid_h))) % int(grid_h)
-    pad_w = (int(grid_w) - (int(width) % int(grid_w))) % int(grid_w)
-    return pad_h, pad_w
+def compute_square_padding(width: int, height: int, target_side: int) -> tuple[int, int, int, int]:
+    pad_w = max(0, int(target_side) - int(width))
+    pad_h = max(0, int(target_side) - int(height))
+    left = pad_w // 2
+    right = pad_w - left
+    top = pad_h // 2
+    bottom = pad_h - top
+    return left, top, right, bottom
 
 
-def _is_retryable_shape_error(error: Exception) -> bool:
-    message = str(error).lower()
-    return (
-        "rearrange-reduction pattern" in message
-        or ("expected input" in message and "to have" in message and "channels" in message)
+def _pad_reflect_square(image_np: np.ndarray, target_side: int) -> tuple[np.ndarray, tuple[int, int, int, int]]:
+    height, width = image_np.shape[:2]
+    left, top, right, bottom = compute_square_padding(width, height, target_side)
+    if left == 0 and top == 0 and right == 0 and bottom == 0:
+        return image_np, (left, top, right, bottom)
+
+    pad_mode = "reflect" if min(height, width) > 1 else "edge"
+    padded = np.pad(
+        image_np,
+        ((top, bottom), (left, right), (0, 0)),
+        mode=pad_mode,
     )
-
-
-def _infer_grid_from_error(error: Exception, infer_width: int) -> tuple[int, int] | None:
-    pattern = re.compile(
-        r"expected input\[1,\s*(\d+),\s*(\d+),\s*(\d+)\]\s*to have\s*(\d+)\s*channels",
-        re.IGNORECASE,
-    )
-    match = pattern.search(str(error))
-    if not match:
-        return None
-
-    got_channels = int(match.group(1))
-    out_width = int(match.group(3))
-    expected_channels = int(match.group(4))
-    if out_width <= 0 or got_channels <= 0 or expected_channels <= 0:
-        return None
-
-    if got_channels % 3 != 0 or expected_channels % 3 != 0:
-        return None
-    expected_patch_area = expected_channels // 3
-
-    wg = max(1, int(round(float(infer_width) / float(out_width))))
-    if expected_patch_area % wg != 0:
-        return None
-    hg = expected_patch_area // wg
-    if hg <= 0:
-        return None
-    return hg, wg
+    return padded, (left, top, right, bottom)
 
 
 class BiRefNetSegmenter:
-    def __init__(self, cache_dir: Path, *, max_side: int = 2048):
+    def __init__(self, cache_dir: Path, *, infer_res: int = 2048):
         torch.set_float32_matmul_precision("high")
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.max_side = max(64, int(max_side))
+        requested_res = int(infer_res)
+        if requested_res not in {1024, 2048}:
+            requested_res = 2048 if requested_res > 1024 else 1024
+        self.infer_res = requested_res
         if not cache_dir.exists() or not any(cache_dir.iterdir()):
             raise FileNotFoundError(
                 f"BiRefNet snapshot not found at {cache_dir}. Run `download_models` to populate the volume."
@@ -102,76 +83,41 @@ class BiRefNetSegmenter:
           car_mask:         PIL "L" mask, same size as input. 255=car, 0=bg.
           car_rgba_refined: PIL "RGBA" with refined alpha (guided filter).
         """
-
         orig_w, orig_h = image.size
         img_rgb = image.convert("RGB")
-        infer_w, infer_h = compute_inference_size(orig_w, orig_h, self.max_side)
+        infer_w, infer_h = compute_inference_size(orig_w, orig_h, self.infer_res)
         infer_image = (
             img_rgb
             if (infer_w, infer_h) == (orig_w, orig_h)
             else img_rgb.resize((infer_w, infer_h), Image.Resampling.LANCZOS)
         )
 
-        default_grids: list[tuple[int, int]] = [
-            (GRID_FACTOR_H, GRID_FACTOR_W),
-            (31, 32),
-            (32, 31),
-            (64, 64),
-            (16, 16),
-        ]
-        queued_grids = list(default_grids)
-        seen_grids: set[tuple[int, int]] = set()
-        pred = None
-        errors: list[str] = []
+        infer_np = np.array(infer_image, dtype=np.uint8)
+        padded_np, (pad_left, pad_top, pad_right, pad_bottom) = _pad_reflect_square(
+            infer_np,
+            self.infer_res,
+        )
+        padded_image = Image.fromarray(padded_np, mode="RGB")
 
-        while queued_grids:
-            grid_h, grid_w = queued_grids.pop(0)
-            if grid_h <= 0 or grid_w <= 0:
-                continue
-            if (grid_h, grid_w) in seen_grids:
-                continue
-            seen_grids.add((grid_h, grid_w))
+        tensor = self.transform(padded_image).unsqueeze(0).to(self.device)
+        if self.device.type == "cuda":
+            tensor = tensor.half()
 
-            pad_h, pad_w = compute_grid_padding(infer_h, infer_w, grid_h=grid_h, grid_w=grid_w)
-            padded_image = infer_image
-            if pad_h or pad_w:
-                infer_np = np.array(infer_image, dtype=np.uint8)
-                infer_np = np.pad(
-                    infer_np,
-                    ((0, pad_h), (0, pad_w), (0, 0)),
-                    mode="reflect",
-                )
-                padded_image = Image.fromarray(infer_np, mode="RGB")
+        outputs = self.model(tensor)
+        if isinstance(outputs, (tuple, list)):
+            pred = outputs[-1]
+        else:
+            pred = getattr(outputs, "logits", outputs)
 
-            try:
-                tensor = self.transform(padded_image).unsqueeze(0).to(self.device)
-                if self.device.type == "cuda":
-                    tensor = tensor.half()
+        pred = pred.sigmoid()
+        if pred.ndim == 3:
+            pred = pred.unsqueeze(1)
+        if tuple(pred.shape[-2:]) != (self.infer_res, self.infer_res):
+            pred = F.interpolate(pred.float(), size=(self.infer_res, self.infer_res), mode="bilinear", align_corners=False)
 
-                outputs = self.model(tensor)
-                if isinstance(outputs, (tuple, list)):
-                    pred = outputs[-1]
-                else:
-                    pred = getattr(outputs, "logits", outputs)
-
-                pred = pred.sigmoid()
-                if pred.ndim == 3:
-                    pred = pred.unsqueeze(1)
-                if pad_h or pad_w:
-                    pred = pred[..., :infer_h, :infer_w]
-                break
-            except RuntimeError as error:
-                if not _is_retryable_shape_error(error):
-                    raise
-                errors.append(str(error))
-                inferred_grid = _infer_grid_from_error(error, infer_w)
-                if inferred_grid and inferred_grid not in seen_grids and inferred_grid not in queued_grids:
-                    queued_grids.insert(0, inferred_grid)
-
-        if pred is None:
-            error_preview = errors[-1] if errors else "unknown runtime shape error"
-            raise RuntimeError(f"BiRefNet forward failed after layout retries: {error_preview}")
-
+        h_end = self.infer_res - pad_bottom if pad_bottom > 0 else self.infer_res
+        w_end = self.infer_res - pad_right if pad_right > 0 else self.infer_res
+        pred = pred[..., pad_top:h_end, pad_left:w_end]
         pred = F.interpolate(pred.float(), size=(orig_h, orig_w), mode="bilinear", align_corners=False)
         pred_squeezed = pred[0].squeeze().cpu()
 

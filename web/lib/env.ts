@@ -35,12 +35,16 @@ const envSchema = z.object({
   PIPELINE_VARIANT: z.enum(["core", "full"]).default("core"),
   MODEL_CACHE_DIR: z.string().default("/runpod-volume/models"),
   HF_HOME: z.string().default("/runpod-volume/hf_cache"),
-  BIREFNET_REPO_ID: z.string().default("ZhengPeng7/BiRefNet_dynamic-matting"),
-  BIREFNET_MAX_SIDE: z.coerce.number().int().positive().default(2048),
+  BIREFNET_REPO_ID: z.string().default("ZhengPeng7/BiRefNet_HR"),
+  BIREFNET_INFER_RES: z.coerce.number().int().refine((value) => value === 1024 || value === 2048, {
+    message: "BIREFNET_INFER_RES must be 1024 or 2048"
+  }).default(2048),
   MAX_OUTPUT_LONG_EDGE: z.coerce.number().int().positive().default(2048),
   OUTPUT_RESIZE_MODE: z.enum(["preserve", "stretch"]).default("preserve"),
   CORE_CONTACT_SHADOW_STRENGTH: z.coerce.number().min(0).max(1).default(0.32),
+  CONTACT_SHADOW_MODE: z.enum(["v1", "v2"]).default("v2"),
   GLASS_NORMALIZATION_MODE: z.enum(["off", "auto", "force"]).default("off"),
+  STUDIO_MODE: z.enum(["off", "auto", "on"]).default("auto"),
   WORKER_IMAGE: z.string().optional(),
   GHCR_USERNAME: z.string().optional(),
   GHCR_TOKEN: z.string().optional(),

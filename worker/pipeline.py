@@ -24,13 +24,16 @@ from utils.image import (
 from utils.image_ops import (
     apply_contact_shadow,
     apply_glass_normalization,
-    apply_low_frequency_harmonization,
+    apply_multiband_harmonization,
     apply_luminance_transfer_fallback,
     blend_background_only,
+    compute_edge_halo_stats,
     compute_mask_artifact_checks,
     compute_detail_preservation_ratio,
     get_tight_bbox_from_mask,
+    is_studio_background,
     paste_mask_into_background,
+    reharden_resized_alpha,
 )
 
 _models: Dict[str, Any] = {}
@@ -52,7 +55,7 @@ def get_models(settings: Settings, *, variant: str) -> Dict[str, Any]:
         logger.info("Loading BiRefNet + ControlCom (cold start)...")
         _models["segmenter"] = BiRefNetSegmenter(
             cache_dir / "birefnet",
-            max_side=settings.birefnet_max_side,
+            infer_res=settings.birefnet_infer_res,
         )
         _models["harmonizer"] = ControlComHarmonizer(
             repo_dir=Path(settings.controlcom_repo_dir),
@@ -105,8 +108,9 @@ def place_car_on_background(
 
     car_crop_rgba = car_rgba_refined.crop(tight_bbox)
     car_placed_rgba = car_crop_rgba.resize((car_w, car_h), Image.Resampling.LANCZOS)
-    placed_mask = car_placed_rgba.split()[-1].convert("L")
     placed_foreground_rgb = car_placed_rgba.convert("RGB")
+    placed_mask = reharden_resized_alpha(car_placed_rgba.split()[-1].convert("L"))
+    car_placed_rgba = Image.merge("RGBA", (*placed_foreground_rgb.split(), placed_mask))
 
     x = (bg_w - car_w) // 2
     y = int(bg_h * 0.85) - car_h
@@ -175,7 +179,8 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
 
     logger.info(f"[{job_id}] Step 2: ControlCom harmonization...")
     t0 = _now_s()
-    harmonization_method = "controlcom_lf"
+    harmonization_method = "controlcom_multiband"
+    harmonization_diag: Dict[str, float] = {"protectCoverageRatio": 0.0}
     controlcom_error: str | None = None
     if mask_quality_bad:
         controlcom_error = (
@@ -201,7 +206,7 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
                 fg_mask_crop=placed_mask,
                 placement_bbox=placement_bbox,
             )
-            composite_harmonized = apply_low_frequency_harmonization(
+            composite_harmonized, harmonization_diag = apply_multiband_harmonization(
                 original_composite=composite_raw,
                 harmonized_guidance=composite_guidance,
                 foreground_mask=foreground_mask,
@@ -226,7 +231,7 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
         foreground_mask=foreground_mask,
         foreground_bbox=placement_bbox,
     )
-    if harmonization_method == "controlcom_lf" and detail_ratio < 0.85:
+    if harmonization_method == "controlcom_multiband" and detail_ratio < 0.90:
         logger.warning(
             f"[{job_id}] Detail preservation ratio dropped to {detail_ratio:.4f}. "
             "Switching to deterministic luminance-transfer fallback."
@@ -237,6 +242,7 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
             foreground_mask=foreground_mask,
             foreground_bbox=placement_bbox,
         )
+        harmonization_diag = {"protectCoverageRatio": 0.0}
         detail_ratio = compute_detail_preservation_ratio(
             baseline_image=composite_raw,
             candidate_image=composite_harmonized,
@@ -251,6 +257,8 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
     quality: str | None = None
     contact_shadow_applied = False
     glass_mode_applied = "off"
+    studio_mode_applied = "off"
+    studio_background = is_studio_background(bg_proc)
 
     if variant == "core":
         try:
@@ -259,6 +267,7 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
                 foreground_mask=foreground_mask,
                 foreground_bbox=placement_bbox,
                 strength=settings.core_contact_shadow_strength,
+                mode=settings.contact_shadow_mode,
             )
         except Exception as error:
             logger.warning(f"[{job_id}] Contact shadow generation failed: {error}")
@@ -277,15 +286,25 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
         final = blend_background_only(final, reflection_full, foreground_mask, alpha=reflection_strength)
         timings["reflection_s"] = round(_now_s() - t0, 3)
 
-    if settings.glass_normalization_mode in {"auto", "force"}:
+    effective_glass_mode = settings.glass_normalization_mode
+    if settings.studio_mode == "on":
+        studio_mode_applied = "on"
+        if effective_glass_mode == "off":
+            effective_glass_mode = "force"
+    elif settings.studio_mode == "auto" and studio_background:
+        studio_mode_applied = "auto"
+        if effective_glass_mode == "off":
+            effective_glass_mode = "auto"
+
+    if effective_glass_mode in {"auto", "force"}:
         final, glass_applied = apply_glass_normalization(
             image=final,
             foreground_mask=foreground_mask,
             foreground_bbox=placement_bbox,
-            mode=settings.glass_normalization_mode,
+            mode=effective_glass_mode,
         )
         if glass_applied:
-            glass_mode_applied = settings.glass_normalization_mode
+            glass_mode_applied = effective_glass_mode
 
     if variant == "full":
         logger.info(f"[{job_id}] Step 5: BargainNet QC (HarmonyScoreModel)...")
@@ -320,12 +339,23 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
     if controlcom_error and harmonization_method == "lab_transfer":
         detail_preservation["fallbackReason"] = controlcom_error[:320]
 
+    edge_halo_stats = compute_edge_halo_stats(
+        baseline_image=composite_raw,
+        candidate_image=final,
+        foreground_mask=foreground_mask,
+        foreground_bbox=placement_bbox,
+    )
+
     artifact_checks: Dict[str, Any] = {
         "interiorOpaqueRatio": round(float(mask_checks["interiorOpaqueRatio"]), 4),
         "outsideLeakMeanAlpha": round(float(mask_checks["outsideLeakMeanAlpha"]), 6),
         "maskAreaRatio": round(float(mask_checks["maskAreaRatio"]), 4),
+        "edgeHaloMeanDelta": round(float(edge_halo_stats["edgeHaloMeanDelta"]), 4),
+        "edgeBandWidthPx": round(float(edge_halo_stats["edgeBandWidthPx"]), 4),
+        "protectCoverageRatio": round(float(harmonization_diag.get("protectCoverageRatio", 0.0)), 4),
         "contactShadowApplied": contact_shadow_applied,
         "glassModeApplied": glass_mode_applied,
+        "studioModeApplied": studio_mode_applied,
     }
 
     logger.info(f"[{job_id}] Uploading output...")
