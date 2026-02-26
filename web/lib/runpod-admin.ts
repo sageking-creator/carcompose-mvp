@@ -21,6 +21,23 @@ class RunpodGraphqlRequestError extends Error {
   }
 }
 
+function isUniqueNameConstraintError(error: unknown): boolean {
+  if (!(error instanceof RunpodGraphqlRequestError)) {
+    return false;
+  }
+
+  const text = error.messages.join(" ").toLowerCase();
+  return (
+    text.includes("name must be unique") ||
+    text.includes("already exists") ||
+    text.includes("duplicate")
+  );
+}
+
+async function waitMs(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function isSchemaCompatibilityError(error: unknown): boolean {
   if (!(error instanceof RunpodGraphqlRequestError)) {
     return false;
@@ -169,6 +186,23 @@ async function tryFindTemplateByName(name: string): Promise<string | null> {
 
   const match = templates.find((template) => template.name === name);
   return match?.id ?? null;
+}
+
+async function tryFindTemplateByNameWithRetries(
+  name: string,
+  retries = 5,
+  delayMs = 300
+): Promise<string | null> {
+  for (let attempt = 0; attempt < retries; attempt += 1) {
+    const templateId = await tryFindTemplateByName(name);
+    if (templateId) {
+      return templateId;
+    }
+    if (attempt < retries - 1) {
+      await waitMs(delayMs * (attempt + 1));
+    }
+  }
+  return null;
 }
 
 async function tryFindRegistryAuthByName(name: string): Promise<string | null> {
@@ -389,87 +423,36 @@ export async function ensureTemplate(params: {
     ? { ...baseTemplateInput, containerRegistryAuthId: params.registryAuthId }
     : baseTemplateInput;
 
-  return runWithSchemaFallback<string>([
-    async () => {
-      const data = await runpodGraphql<{
-        createTemplate: { id: string };
-      }>(
-        `mutation CreateTemplate($input: CreateTemplateInput!) {
-          createTemplate(input: $input) {
-            id
+  try {
+    return await runWithSchemaFallback<string>([
+      async () => {
+        const data = await runpodGraphql<{
+          createTemplate: { id: string };
+        }>(
+          `mutation CreateTemplate($input: CreateTemplateInput!) {
+            createTemplate(input: $input) {
+              id
+            }
+          }`,
+          {
+            input: templateInput
           }
-        }`,
-        {
-          input: templateInput
-        }
-      );
-      return data.createTemplate.id;
-    },
-    async () => {
-      const data = await runpodGraphql<{
-        createTemplate: { id: string };
-      }>(
-        `mutation CreateTemplate(
-          $name: String!,
-          $imageName: String!,
-          $volumeInGb: Int!,
-          $volumeMountPath: String!,
-          $env: [EnvironmentVariableInput]!,
-          $containerRegistryAuthId: String
-        ) {
-          createTemplate(
-            name: $name,
-            imageName: $imageName,
-            containerDiskInGb: 20,
-            dockerArgs: "",
-            volumeInGb: $volumeInGb,
-            volumeMountPath: $volumeMountPath,
-            env: $env,
-            isServerless: true,
-            containerRegistryAuthId: $containerRegistryAuthId
+        );
+        return data.createTemplate.id;
+      },
+      async () => {
+        const data = await runpodGraphql<{
+          createTemplate: { id: string };
+        }>(
+          `mutation CreateTemplate(
+            $name: String!,
+            $imageName: String!,
+            $volumeInGb: Int!,
+            $volumeMountPath: String!,
+            $env: [EnvironmentVariableInput]!,
+            $containerRegistryAuthId: String
           ) {
-            id
-          }
-        }`,
-        {
-          name: params.name,
-          imageName: params.dockerImage,
-          volumeInGb: 0,
-          volumeMountPath: params.volumeMountPath,
-          env: params.env,
-          containerRegistryAuthId: params.registryAuthId
-        }
-      );
-      return data.createTemplate.id;
-    },
-    async () => {
-      const data = await runpodGraphql<{
-        saveTemplate: { id: string };
-      }>(
-        `mutation SaveTemplate($input: SaveTemplateInput!) {
-          saveTemplate(input: $input) {
-            id
-          }
-        }`,
-        {
-          input: templateInput
-        }
-      );
-      return data.saveTemplate.id;
-    },
-    async () => {
-      const data = await runpodGraphql<{
-        saveTemplate: { id: string };
-      }>(
-        `mutation SaveTemplate(
-          $name: String!,
-          $imageName: String!,
-          $volumeInGb: Int!,
-          $volumeMountPath: String!,
-          $env: [EnvironmentVariableInput]!
-        ) {
-          saveTemplate(
-            input: {
+            createTemplate(
               name: $name,
               imageName: $imageName,
               containerDiskInGb: 20,
@@ -477,23 +460,84 @@ export async function ensureTemplate(params: {
               volumeInGb: $volumeInGb,
               volumeMountPath: $volumeMountPath,
               env: $env,
-              isServerless: true
+              isServerless: true,
+              containerRegistryAuthId: $containerRegistryAuthId
+            ) {
+              id
             }
-          ) {
-            id
+          }`,
+          {
+            name: params.name,
+            imageName: params.dockerImage,
+            volumeInGb: 0,
+            volumeMountPath: params.volumeMountPath,
+            env: params.env,
+            containerRegistryAuthId: params.registryAuthId
           }
-        }`,
-        {
-          name: params.name,
-          imageName: params.dockerImage,
-          volumeInGb: 0,
-          volumeMountPath: params.volumeMountPath,
-          env: params.env
-        }
-      );
-      return data.saveTemplate.id;
+        );
+        return data.createTemplate.id;
+      },
+      async () => {
+        const data = await runpodGraphql<{
+          saveTemplate: { id: string };
+        }>(
+          `mutation SaveTemplate($input: SaveTemplateInput!) {
+            saveTemplate(input: $input) {
+              id
+            }
+          }`,
+          {
+            input: templateInput
+          }
+        );
+        return data.saveTemplate.id;
+      },
+      async () => {
+        const data = await runpodGraphql<{
+          saveTemplate: { id: string };
+        }>(
+          `mutation SaveTemplate(
+            $name: String!,
+            $imageName: String!,
+            $volumeInGb: Int!,
+            $volumeMountPath: String!,
+            $env: [EnvironmentVariableInput]!
+          ) {
+            saveTemplate(
+              input: {
+                name: $name,
+                imageName: $imageName,
+                containerDiskInGb: 20,
+                dockerArgs: "",
+                volumeInGb: $volumeInGb,
+                volumeMountPath: $volumeMountPath,
+                env: $env,
+                isServerless: true
+              }
+            ) {
+              id
+            }
+          }`,
+          {
+            name: params.name,
+            imageName: params.dockerImage,
+            volumeInGb: 0,
+            volumeMountPath: params.volumeMountPath,
+            env: params.env
+          }
+        );
+        return data.saveTemplate.id;
+      }
+    ]);
+  } catch (error) {
+    if (isUniqueNameConstraintError(error)) {
+      const existingTemplateId = await tryFindTemplateByNameWithRetries(params.name);
+      if (existingTemplateId) {
+        return existingTemplateId;
+      }
     }
-  ]);
+    throw error;
+  }
 }
 
 export async function ensureEndpoint(params: {

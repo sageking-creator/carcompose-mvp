@@ -77,6 +77,50 @@ test("ensureTemplate falls back from createTemplate to saveTemplate", async () =
   }
 });
 
+test("ensureTemplate reuses existing template on unique-name race", async () => {
+  setRequiredEnv();
+  resetEnvCacheForTests();
+
+  const originalFetch = global.fetch;
+  let listTemplateCalls = 0;
+
+  global.fetch = async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as { query?: string };
+    const query = body.query ?? "";
+
+    if (query.includes("query ListPodTemplates")) {
+      listTemplateCalls += 1;
+      if (listTemplateCalls === 1) {
+        return makeJsonResponse(200, { data: { myself: { podTemplates: [] } } });
+      }
+      return makeJsonResponse(200, {
+        data: { myself: { podTemplates: [{ id: "tmpl_existing", name: "carcompose-worker-template-race" }] } }
+      });
+    }
+
+    if (query.includes("mutation CreateTemplate(") || query.includes("mutation SaveTemplate(")) {
+      return makeJsonResponse(200, { errors: [{ message: "Template name must be unique." }] });
+    }
+
+    return makeJsonResponse(500, { errors: [{ message: `Unexpected query: ${query}` }] });
+  };
+
+  try {
+    const templateId = await ensureTemplate({
+      name: "carcompose-worker-template-race",
+      dockerImage: "ghcr.io/example/image:main",
+      volumeMountPath: "/runpod-volume",
+      env: [{ key: "PIPELINE_VARIANT", value: "core" }]
+    });
+
+    assert.equal(templateId, "tmpl_existing");
+    assert.equal(listTemplateCalls >= 2, true);
+  } finally {
+    global.fetch = originalFetch;
+    resetEnvCacheForTests();
+  }
+});
+
 test("ensureVolume falls back from createNetworkVolume to saveNetworkVolume", async () => {
   setRequiredEnv();
   resetEnvCacheForTests();
