@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, Tuple
 
 from loguru import logger
+import numpy as np
 from PIL import Image
 
 from exceptions import HarmonyScoreTooLowError, InvalidInputError
@@ -34,6 +35,7 @@ from utils.image_ops import (
     is_studio_background,
     paste_mask_into_background,
     reharden_resized_alpha,
+    resize_rgba_premultiplied,
 )
 
 _models: Dict[str, Any] = {}
@@ -45,6 +47,22 @@ def _now_s() -> float:
 
 def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
+
+
+def _maybe_dump_debug_image(settings: Settings, job_id: str, name: str, image: Image.Image) -> None:
+    if not settings.debug_artifacts:
+        return
+    try:
+        out_dir = Path("/tmp/carcompose-debug") / job_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+        ext = "png" if image.mode in {"RGBA", "LA", "L"} else "jpg"
+        path = out_dir / f"{name}.{ext}"
+        if ext == "jpg":
+            image.convert("RGB").save(path, format="JPEG", quality=96, subsampling=0, optimize=True)
+        else:
+            image.save(path, format="PNG")
+    except Exception as error:
+        logger.warning(f"[{job_id}] Failed to write debug artifact '{name}': {error}")
 
 
 def get_models(settings: Settings, *, variant: str) -> Dict[str, Any]:
@@ -107,9 +125,12 @@ def place_car_on_background(
         car_w = int(car_h * aspect)
 
     car_crop_rgba = car_rgba_refined.crop(tight_bbox)
-    car_placed_rgba = car_crop_rgba.resize((car_w, car_h), Image.Resampling.LANCZOS)
-    placed_foreground_rgb = car_placed_rgba.convert("RGB")
-    placed_mask = reharden_resized_alpha(car_placed_rgba.split()[-1].convert("L"))
+    resized_rgb, resized_alpha = resize_rgba_premultiplied(car_crop_rgba, (car_w, car_h))
+    placed_mask = reharden_resized_alpha(resized_alpha)
+    alpha_np = np.array(placed_mask, dtype=np.float32) / 255.0
+    rgb_np = np.array(resized_rgb, dtype=np.uint8)
+    rgb_np[alpha_np <= 0.01] = 0
+    placed_foreground_rgb = Image.fromarray(rgb_np, mode="RGB")
     car_placed_rgba = Image.merge("RGBA", (*placed_foreground_rgb.split(), placed_mask))
 
     x = (bg_w - car_w) // 2
@@ -163,11 +184,15 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
     t0 = _now_s()
     car_mask, car_rgba_refined = models["segmenter"].segment(car_image)
     timings["segmentation_s"] = round(_now_s() - t0, 3)
+    _maybe_dump_debug_image(settings, job_id, "01_mask", car_mask)
+    _maybe_dump_debug_image(settings, job_id, "02_foreground_rgba", car_rgba_refined)
 
     tight_bbox = get_tight_bbox_from_mask(car_mask)
     composite_raw, placement_bbox, placed_mask, placed_foreground_rgb = place_car_on_background(
         car_rgba_refined=car_rgba_refined, tight_bbox=tight_bbox, bg_image=bg_proc
     )
+    _maybe_dump_debug_image(settings, job_id, "03_composite_raw", composite_raw)
+    _maybe_dump_debug_image(settings, job_id, "04_placed_mask", placed_mask)
     foreground_mask = paste_mask_into_background(bg_proc.size, placement_bbox, placed_mask)
     mask_checks = compute_mask_artifact_checks(foreground_mask, placement_bbox)
     mask_quality_bad = (
@@ -175,6 +200,8 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
         or mask_checks["maskAreaRatio"] > 0.85
         or mask_checks["interiorOpaqueRatio"] < 0.985
         or mask_checks["outsideLeakMeanAlpha"] > 0.01
+        or mask_checks["nearLeakMeanAlpha"] > 0.02
+        or mask_checks["nearLeakP95Alpha"] > 0.12
     )
 
     logger.info(f"[{job_id}] Step 2: ControlCom harmonization...")
@@ -206,6 +233,7 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
                 fg_mask_crop=placed_mask,
                 placement_bbox=placement_bbox,
             )
+            _maybe_dump_debug_image(settings, job_id, "05_controlcom_guidance", composite_guidance)
             composite_harmonized, harmonization_diag = apply_multiband_harmonization(
                 original_composite=composite_raw,
                 harmonized_guidance=composite_guidance,
@@ -249,8 +277,41 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
             foreground_mask=foreground_mask,
             foreground_bbox=placement_bbox,
         )
+    edge_halo_after_harmonization = compute_edge_halo_stats(
+        baseline_image=composite_raw,
+        candidate_image=composite_harmonized,
+        foreground_mask=foreground_mask,
+        foreground_bbox=placement_bbox,
+    )
+    if (
+        harmonization_method == "controlcom_multiband"
+        and (
+            edge_halo_after_harmonization["edgeHaloMeanDelta"] > settings.max_edge_halo_mean_delta
+            or edge_halo_after_harmonization["edgeBandWidthPx"] > settings.max_edge_band_width_px
+        )
+    ):
+        logger.warning(
+            f"[{job_id}] Harmonization introduced edge halos "
+            f"(delta={edge_halo_after_harmonization['edgeHaloMeanDelta']:.3f}, "
+            f"band={edge_halo_after_harmonization['edgeBandWidthPx']:.3f}). "
+            "Switching to deterministic luminance-transfer fallback."
+        )
+        harmonization_method = "lab_transfer"
+        composite_harmonized = apply_luminance_transfer_fallback(
+            image=composite_raw,
+            foreground_mask=foreground_mask,
+            foreground_bbox=placement_bbox,
+        )
+        harmonization_diag = {"protectCoverageRatio": 0.0}
+        detail_ratio = compute_detail_preservation_ratio(
+            baseline_image=composite_raw,
+            candidate_image=composite_harmonized,
+            foreground_mask=foreground_mask,
+            foreground_bbox=placement_bbox,
+        )
 
     timings["harmonization_s"] = round(_now_s() - t0, 3)
+    _maybe_dump_debug_image(settings, job_id, "06_harmonized", composite_harmonized)
 
     final = composite_harmonized
     harmony_score: float | None = None
@@ -349,6 +410,8 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
     artifact_checks: Dict[str, Any] = {
         "interiorOpaqueRatio": round(float(mask_checks["interiorOpaqueRatio"]), 4),
         "outsideLeakMeanAlpha": round(float(mask_checks["outsideLeakMeanAlpha"]), 6),
+        "nearLeakMeanAlpha": round(float(mask_checks["nearLeakMeanAlpha"]), 6),
+        "nearLeakP95Alpha": round(float(mask_checks["nearLeakP95Alpha"]), 6),
         "maskAreaRatio": round(float(mask_checks["maskAreaRatio"]), 4),
         "edgeHaloMeanDelta": round(float(edge_halo_stats["edgeHaloMeanDelta"]), 4),
         "edgeBandWidthPx": round(float(edge_halo_stats["edgeBandWidthPx"]), 4),
@@ -357,6 +420,7 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
         "glassModeApplied": glass_mode_applied,
         "studioModeApplied": studio_mode_applied,
     }
+    _maybe_dump_debug_image(settings, job_id, "07_final", final)
 
     logger.info(f"[{job_id}] Uploading output...")
     t0 = _now_s()

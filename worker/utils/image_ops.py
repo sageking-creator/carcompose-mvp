@@ -32,6 +32,49 @@ def _smoothstep(edge0: float, edge1: float, value: np.ndarray) -> np.ndarray:
     return scaled * scaled * (3.0 - (2.0 * scaled))
 
 
+def _srgb_to_linear(rgb: np.ndarray) -> np.ndarray:
+    rgb = np.clip(rgb.astype(np.float32), 0.0, 1.0)
+    return np.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4)
+
+
+def _linear_to_srgb(rgb_linear: np.ndarray) -> np.ndarray:
+    rgb_linear = np.clip(rgb_linear.astype(np.float32), 0.0, 1.0)
+    return np.where(
+        rgb_linear <= 0.0031308,
+        rgb_linear * 12.92,
+        (1.055 * np.power(rgb_linear, 1.0 / 2.4)) - 0.055,
+    )
+
+
+def resize_rgba_premultiplied(
+    rgba: Image.Image,
+    size: Tuple[int, int],
+    interpolation: int = cv2.INTER_LANCZOS4,
+) -> tuple[Image.Image, Image.Image]:
+    target_w = max(1, int(size[0]))
+    target_h = max(1, int(size[1]))
+
+    rgba_np = np.array(rgba.convert("RGBA"), dtype=np.float32) / 255.0
+    alpha = np.clip(rgba_np[:, :, 3], 0.0, 1.0)
+    rgb_linear = _srgb_to_linear(rgba_np[:, :, :3])
+
+    premult = rgb_linear * alpha[..., None]
+    premult_resized = cv2.resize(premult, (target_w, target_h), interpolation=interpolation)
+    alpha_resized = cv2.resize(alpha, (target_w, target_h), interpolation=interpolation)
+    alpha_resized = np.clip(alpha_resized, 0.0, 1.0).astype(np.float32)
+
+    alpha_safe = np.maximum(alpha_resized, 1e-4)
+    rgb_linear_resized = premult_resized / alpha_safe[..., None]
+    rgb_linear_resized[alpha_resized <= 1e-3] = 0.0
+    rgb_linear_resized = np.clip(rgb_linear_resized, 0.0, 1.0)
+
+    rgb_srgb = _linear_to_srgb(rgb_linear_resized)
+    rgb_u8 = np.clip(rgb_srgb * 255.0, 0.0, 255.0).astype(np.uint8)
+    alpha_u8 = np.clip(alpha_resized * 255.0, 0.0, 255.0).astype(np.uint8)
+
+    return Image.fromarray(rgb_u8, mode="RGB"), Image.fromarray(alpha_u8, mode="L")
+
+
 def get_tight_bbox_from_mask(mask: Image.Image, min_area_ratio: float = 0.005) -> Tuple[int, int, int, int]:
     mask_np = np.array(mask.convert("L"), dtype=np.uint8)
     hard = mask_np >= 127
@@ -65,7 +108,7 @@ def reharden_resized_alpha(mask_crop_resized: Image.Image, edge_px: int | None =
         return mask_crop_resized.convert("L")
 
     long_edge = max(alpha.shape)
-    band_px = int(edge_px if edge_px is not None else np.clip(round(long_edge * 0.004), 4, 8))
+    band_px = int(edge_px if edge_px is not None else np.clip(round(long_edge * 0.0025), 2, 5))
     kernel_size = _odd_kernel_size(max(3, band_px * 2 + 1))
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
 
@@ -129,9 +172,21 @@ def compute_mask_artifact_checks(
     outside = dilated == 0
     outside_leak_mean_alpha = float(np.mean(mask_np[outside])) if outside.any() else 0.0
 
+    near_kernel_size = _odd_kernel_size(max(9, int(round(max(bbox_w, bbox_h) * 0.04))))
+    near_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (near_kernel_size, near_kernel_size))
+    outer_ring = np.logical_and(cv2.dilate(hard, near_kernel) > 0, hard == 0)
+    if outer_ring.any():
+        near_leak_mean_alpha = float(np.mean(mask_np[outer_ring]))
+        near_leak_p95_alpha = float(np.percentile(mask_np[outer_ring], 95))
+    else:
+        near_leak_mean_alpha = 0.0
+        near_leak_p95_alpha = 0.0
+
     return {
         "interiorOpaqueRatio": interior_opaque_ratio,
         "outsideLeakMeanAlpha": outside_leak_mean_alpha,
+        "nearLeakMeanAlpha": near_leak_mean_alpha,
+        "nearLeakP95Alpha": near_leak_p95_alpha,
         "maskAreaRatio": mask_area_ratio,
     }
 
@@ -250,6 +305,15 @@ def apply_multiband_harmonization(
     guidance_low = cv2.bilateralFilter(guidance_u8, d=9, sigmaColor=50, sigmaSpace=9).astype(np.float32)
     detail = base_region - base_low
     candidate = np.clip(guidance_low + detail, 0.0, 255.0)
+    base_lab = cv2.cvtColor(base_u8, cv2.COLOR_RGB2LAB).astype(np.float32)
+    cand_lab = cv2.cvtColor(np.clip(candidate, 0.0, 255.0).astype(np.uint8), cv2.COLOR_RGB2LAB).astype(np.float32)
+    delta_lab = cand_lab - base_lab
+    delta_lab[:, :, 0] = np.clip(delta_lab[:, :, 0], -18.0, 18.0)
+    delta_lab[:, :, 1] = np.clip(delta_lab[:, :, 1], -7.0, 7.0)
+    delta_lab[:, :, 2] = np.clip(delta_lab[:, :, 2], -7.0, 7.0)
+    candidate = cv2.cvtColor(np.clip(base_lab + delta_lab, 0.0, 255.0).astype(np.uint8), cv2.COLOR_LAB2RGB).astype(
+        np.float32
+    )
 
     alpha_soft = cv2.GaussianBlur(alpha_region, (0, 0), sigmaX=2.0, sigmaY=2.0)
     alpha_soft = np.clip(alpha_soft, 0.0, 1.0)

@@ -26,6 +26,8 @@ type WorkerSuccessOutput = {
   artifactChecks?: {
     interiorOpaqueRatio?: number;
     outsideLeakMeanAlpha?: number;
+    nearLeakMeanAlpha?: number;
+    nearLeakP95Alpha?: number;
     maskAreaRatio?: number;
     edgeHaloMeanDelta?: number;
     edgeBandWidthPx?: number;

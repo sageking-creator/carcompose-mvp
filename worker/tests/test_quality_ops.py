@@ -17,6 +17,7 @@ from utils.image_ops import (
     apply_glass_normalization,
     compute_mask_artifact_checks,
     get_tight_bbox_from_mask,
+    resize_rgba_premultiplied,
 )
 from utils.refine import build_hardened_alpha
 
@@ -129,6 +130,23 @@ class QualityOpsTests(unittest.TestCase):
         lower_diff = diff[y1 + 90 : y2, x1:x2].mean()
         self.assertGreater(float(upper_diff), 0.5)
         self.assertLess(float(lower_diff), float(upper_diff))
+
+    def test_premultiplied_rgba_resize_prevents_background_bleed(self) -> None:
+        width, height = 200, 120
+        rgba_np = np.zeros((height, width, 4), dtype=np.uint8)
+        rgba_np[:, :, :3] = np.array([20, 20, 220], dtype=np.uint8)
+        rgba_np[20:100, 60:160, :3] = np.array([210, 30, 30], dtype=np.uint8)
+        rgba_np[20:100, 60:160, 3] = 255
+
+        rgba = Image.fromarray(rgba_np, mode="RGBA")
+        resized_rgb, resized_alpha = resize_rgba_premultiplied(rgba, (100, 60))
+
+        rgb_np = np.array(resized_rgb, dtype=np.float32) / 255.0
+        alpha_np = np.array(resized_alpha, dtype=np.float32) / 255.0
+
+        outside = alpha_np < 0.01
+        self.assertTrue(bool(outside.any()))
+        self.assertLess(float(rgb_np[outside].mean()), 0.03)
 
 
 if __name__ == "__main__":

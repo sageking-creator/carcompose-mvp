@@ -22,6 +22,15 @@ class Settings:
     studio_mode: str
     target_width: int
     target_height: int
+    max_edge_halo_mean_delta: float
+    max_edge_band_width_px: float
+    debug_artifacts: bool
+
+
+def _is_truthy(value: str | None) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 
@@ -51,4 +60,7 @@ def get_settings() -> Settings:
         studio_mode=os.getenv("STUDIO_MODE", "auto").lower(),
         target_width=int(os.getenv("TARGET_WIDTH", "1920")),
         target_height=int(os.getenv("TARGET_HEIGHT", "1280")),
+        max_edge_halo_mean_delta=float(os.getenv("MAX_EDGE_HALO_MEAN_DELTA", "14.0")),
+        max_edge_band_width_px=float(os.getenv("MAX_EDGE_BAND_WIDTH_PX", "7.5")),
+        debug_artifacts=_is_truthy(os.getenv("DEBUG_ARTIFACTS")),
     )

@@ -48,6 +48,9 @@ test("getEnv applies worker output defaults", () => {
     assert.equal(env.CONTACT_SHADOW_MODE, "v2");
     assert.equal(env.GLASS_NORMALIZATION_MODE, "off");
     assert.equal(env.STUDIO_MODE, "auto");
+    assert.equal(env.MAX_EDGE_HALO_MEAN_DELTA, 14);
+    assert.equal(env.MAX_EDGE_BAND_WIDTH_PX, 7.5);
+    assert.equal(env.DEBUG_ARTIFACTS, false);
   } finally {
     process.env = snapshot as NodeJS.ProcessEnv;
     resetEnvCacheForTests();

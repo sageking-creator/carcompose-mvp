@@ -45,6 +45,12 @@ const envSchema = z.object({
   CONTACT_SHADOW_MODE: z.enum(["v1", "v2"]).default("v2"),
   GLASS_NORMALIZATION_MODE: z.enum(["off", "auto", "force"]).default("off"),
   STUDIO_MODE: z.enum(["off", "auto", "on"]).default("auto"),
+  MAX_EDGE_HALO_MEAN_DELTA: z.coerce.number().positive().default(14),
+  MAX_EDGE_BAND_WIDTH_PX: z.coerce.number().positive().default(7.5),
+  DEBUG_ARTIFACTS: z
+    .string()
+    .default("false")
+    .transform((value) => ["1", "true", "yes", "on"].includes(value.toLowerCase())),
   WORKER_IMAGE: z.string().optional(),
   GHCR_USERNAME: z.string().optional(),
   GHCR_TOKEN: z.string().optional(),
