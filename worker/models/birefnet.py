@@ -12,6 +12,10 @@ from transformers import AutoModelForImageSegmentation
 from utils.refine import build_hardened_alpha, refine_foreground
 
 
+GRID_FACTOR_H = 31
+GRID_FACTOR_W = 32
+
+
 def compute_inference_size(width: int, height: int, max_side: int) -> tuple[int, int]:
     limit = max(64, int(max_side))
     longest_side = max(width, height)
@@ -19,6 +23,12 @@ def compute_inference_size(width: int, height: int, max_side: int) -> tuple[int,
         return width, height
     scale = limit / float(longest_side)
     return max(1, int(round(width * scale))), max(1, int(round(height * scale)))
+
+
+def compute_grid_padding(height: int, width: int) -> tuple[int, int]:
+    pad_h = (GRID_FACTOR_H - (int(height) % GRID_FACTOR_H)) % GRID_FACTOR_H
+    pad_w = (GRID_FACTOR_W - (int(width) % GRID_FACTOR_W)) % GRID_FACTOR_W
+    return pad_h, pad_w
 
 
 class BiRefNetSegmenter:
@@ -64,6 +74,15 @@ class BiRefNetSegmenter:
             if (infer_w, infer_h) == (orig_w, orig_h)
             else img_rgb.resize((infer_w, infer_h), Image.Resampling.LANCZOS)
         )
+        pad_h, pad_w = compute_grid_padding(infer_h, infer_w)
+        if pad_h or pad_w:
+            infer_np = np.array(infer_image, dtype=np.uint8)
+            infer_np = np.pad(
+                infer_np,
+                ((0, pad_h), (0, pad_w), (0, 0)),
+                mode="reflect",
+            )
+            infer_image = Image.fromarray(infer_np, mode="RGB")
 
         tensor = self.transform(infer_image).unsqueeze(0).to(self.device)
         if self.device.type == "cuda":
@@ -78,6 +97,8 @@ class BiRefNetSegmenter:
         pred = pred.sigmoid()
         if pred.ndim == 3:
             pred = pred.unsqueeze(1)
+        if pad_h or pad_w:
+            pred = pred[..., :infer_h, :infer_w]
         pred = F.interpolate(pred.float(), size=(orig_h, orig_w), mode="bilinear", align_corners=False)
         pred_squeezed = pred[0].squeeze().cpu()
 

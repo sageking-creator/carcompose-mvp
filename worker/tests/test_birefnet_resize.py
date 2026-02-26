@@ -9,8 +9,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 try:
-    from models.birefnet import compute_inference_size
+    from models.birefnet import compute_grid_padding, compute_inference_size
 except Exception as import_error:  # pragma: no cover - environment-dependent import path
+    compute_grid_padding = None
     compute_inference_size = None
     IMPORT_ERROR = import_error
 else:
@@ -37,6 +38,18 @@ class BiRefNetResizeTests(unittest.TestCase):
         width, height = compute_inference_size(1280, 960, 2048)
         self.assertEqual(width, 1280)
         self.assertEqual(height, 960)
+
+    def test_grid_padding_alignment(self) -> None:
+        if compute_grid_padding is None:
+            self.skipTest(f"Unable to import BiRefNet helpers: {IMPORT_ERROR}")
+
+        pad_h, pad_w = compute_grid_padding(1200, 1600)
+        self.assertEqual(pad_h, 9)
+        self.assertEqual(pad_w, 0)
+
+        pad_h, pad_w = compute_grid_padding(992, 1024)
+        self.assertEqual(pad_h, 0)
+        self.assertEqual(pad_w, 0)
 
 
 if __name__ == "__main__":
