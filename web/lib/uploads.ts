@@ -45,6 +45,18 @@ export function buildDebugArtifactKeys(jobId: string): DebugArtifactKeys {
   };
 }
 
+export function debugArtifactEntries(
+  keys?: Partial<Record<DebugArtifactName, string>>
+): Array<[DebugArtifactName, string]> {
+  if (!keys) {
+    return [];
+  }
+
+  return (Object.entries(keys) as Array<[DebugArtifactName, string | undefined]>).filter(
+    (entry): entry is [DebugArtifactName, string] => typeof entry[1] === "string" && entry[1].length > 0
+  );
+}
+
 export function validateUploadContentTypes(contentTypes: UploadContentTypes): void {
   if (!isAllowedImageContentType(contentTypes.car)) {
     throw new Error("Invalid car content type. Allowed: image/jpeg, image/png, image/webp");

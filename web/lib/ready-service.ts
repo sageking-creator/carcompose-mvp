@@ -38,6 +38,8 @@ export type ReadyResult = {
   message: string;
   details: {
     bucket: string;
+    workerImage?: string;
+    workerImageDigest?: string;
     volumeDatacenterId?: string;
     endpointId?: string;
     initJobId?: string;
@@ -160,6 +162,20 @@ function errorMessage(error: unknown): string {
     return error.message;
   }
   return String(error);
+}
+
+function extractWorkerImageDigest(workerImage: string | null | undefined): string | undefined {
+  if (!workerImage) {
+    return undefined;
+  }
+
+  const atIndex = workerImage.lastIndexOf("@");
+  if (atIndex === -1) {
+    return undefined;
+  }
+
+  const digest = workerImage.slice(atIndex + 1).trim();
+  return digest.length > 0 ? digest : undefined;
 }
 
 function isDatacenterNotFoundError(error: unknown): boolean {
@@ -443,7 +459,11 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
       ready: false,
       phase: "error",
       message: workerImage.reason ?? "Unable to resolve worker image.",
-      details: { bucket: env.R2_BUCKET_NAME }
+      details: {
+        bucket: env.R2_BUCKET_NAME,
+        workerImage: workerImage.image ?? undefined,
+        workerImageDigest: extractWorkerImageDigest(workerImage.image ?? undefined)
+      }
     };
   }
 
@@ -453,6 +473,7 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
       : undefined;
 
   const resolvedWorkerImage = await resolveGhcrImageToDigest(workerImage.image, registryAuth);
+  const resolvedWorkerImageDigest = extractWorkerImageDigest(resolvedWorkerImage);
   const registryAuthName = registryAuth ? normalizeRegistryAuthName(registryAuth.username) : undefined;
   let registryAuthId: string | undefined = undefined;
   if (registryAuth) {
@@ -482,13 +503,19 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
     (await putSetupState({
       bucketName: env.R2_BUCKET_NAME,
       workerImage: resolvedWorkerImage,
+      workerImageDigest: resolvedWorkerImageDigest,
       initJobStatus: "NOT_STARTED"
     }));
 
-  if (setup.bucketName !== env.R2_BUCKET_NAME || setup.workerImage !== resolvedWorkerImage) {
+  if (
+    setup.bucketName !== env.R2_BUCKET_NAME ||
+    setup.workerImage !== resolvedWorkerImage ||
+    setup.workerImageDigest !== resolvedWorkerImageDigest
+  ) {
     setup = await putSetupState({
       bucketName: env.R2_BUCKET_NAME,
-      workerImage: resolvedWorkerImage
+      workerImage: resolvedWorkerImage,
+      workerImageDigest: resolvedWorkerImageDigest
     });
   }
 
@@ -652,11 +679,13 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
   if (
     setup.bucketName !== env.R2_BUCKET_NAME ||
     setup.workerImage !== resolvedWorkerImage ||
+    setup.workerImageDigest !== resolvedWorkerImageDigest ||
     setup.provisioningHash !== provisioningHash
   ) {
     setup = await putSetupState({
       bucketName: env.R2_BUCKET_NAME,
       workerImage: resolvedWorkerImage,
+      workerImageDigest: resolvedWorkerImageDigest,
       provisioningHash,
       runpodTemplateId: "",
       runpodEndpointId: "",
@@ -748,6 +777,8 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
       message: "Model download job started.",
       details: {
         bucket: env.R2_BUCKET_NAME,
+        workerImage: resolvedWorkerImage,
+        workerImageDigest: resolvedWorkerImageDigest,
         volumeDatacenterId: activeVolumeDatacenterId,
         endpointId,
         initJobId
@@ -771,6 +802,8 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
         message: workerError,
         details: {
           bucket: env.R2_BUCKET_NAME,
+          workerImage: resolvedWorkerImage,
+          workerImageDigest: resolvedWorkerImageDigest,
           volumeDatacenterId: activeVolumeDatacenterId,
           endpointId,
           initJobId: setup.initJobId
@@ -792,6 +825,8 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
       message: "System is ready.",
       details: {
         bucket: env.R2_BUCKET_NAME,
+        workerImage: resolvedWorkerImage,
+        workerImageDigest: resolvedWorkerImageDigest,
         volumeDatacenterId: activeVolumeDatacenterId,
         endpointId,
         initJobId: setup.initJobId
@@ -808,6 +843,8 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
       message: jobErrorMessage,
       details: {
         bucket: env.R2_BUCKET_NAME,
+        workerImage: resolvedWorkerImage,
+        workerImageDigest: resolvedWorkerImageDigest,
         endpointId: setup.runpodEndpointId,
         initJobId: setup.initJobId
       }
@@ -886,6 +923,8 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
               "Cleared the queue and will reprovision in a different location/GPU on the next poll.",
             details: {
               bucket: env.R2_BUCKET_NAME,
+              workerImage: resolvedWorkerImage,
+              workerImageDigest: resolvedWorkerImageDigest,
               volumeDatacenterId: activeVolumeDatacenterId
             }
           };
@@ -899,6 +938,8 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
             `No workers are active for ${selectedGpuType} in ${activeVolumeDatacenterId} right now.`,
           details: {
             bucket: env.R2_BUCKET_NAME,
+            workerImage: resolvedWorkerImage,
+            workerImageDigest: resolvedWorkerImageDigest,
             volumeDatacenterId: activeVolumeDatacenterId,
             endpointId,
             initJobId: setup.initJobId
@@ -916,6 +957,8 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
     message: "Model download in progress.",
     details: {
       bucket: env.R2_BUCKET_NAME,
+      workerImage: resolvedWorkerImage,
+      workerImageDigest: resolvedWorkerImageDigest,
       volumeDatacenterId: activeVolumeDatacenterId,
       endpointId,
       initJobId: setup.initJobId

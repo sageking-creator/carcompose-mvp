@@ -8,6 +8,7 @@ export type InitJobStatus = "NOT_STARTED" | "RUNNING" | "COMPLETED" | "FAILED";
 export type SetupState = {
   bucketName: string;
   workerImage: string;
+  workerImageDigest?: string;
   provisioningHash?: string;
   runpodVolumeId?: string;
   runpodVolumeDatacenterId?: string;

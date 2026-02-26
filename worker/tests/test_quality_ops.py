@@ -23,6 +23,17 @@ from utils.refine import build_hardened_alpha
 
 
 class QualityOpsTests(unittest.TestCase):
+    @staticmethod
+    def _mask_checks_are_bad(checks: dict[str, float]) -> bool:
+        return (
+            checks["maskAreaRatio"] < 0.005
+            or checks["maskAreaRatio"] > 0.85
+            or checks["interiorOpaqueRatio"] < 0.985
+            or checks["outsideLeakMeanAlpha"] > 0.01
+            or checks["nearLeakMeanAlpha"] > 0.02
+            or checks["nearLeakP95Alpha"] > 0.12
+        )
+
     def test_hardened_alpha_is_opaque_and_low_leak(self) -> None:
         height, width = 256, 384
         image_np = np.full((height, width, 3), 170, dtype=np.uint8)
@@ -60,6 +71,24 @@ class QualityOpsTests(unittest.TestCase):
         self.assertLess(bbox[2], 350)
         self.assertGreaterEqual(checks["interiorOpaqueRatio"], 0.985)
         self.assertLessEqual(checks["outsideLeakMeanAlpha"], 0.01)
+
+    def test_strict_alpha_mode_uses_solid_fallback_when_core_empty(self) -> None:
+        height, width = 320, 480
+        image_np = np.full((height, width, 3), 145, dtype=np.uint8)
+        image = Image.fromarray(image_np, mode="RGB")
+
+        prob = np.zeros((height, width), dtype=np.float32)
+        prob[90:250, 120:360] = 0.57
+
+        alpha, _ = build_hardened_alpha(image, prob, mode="strict", guided_radius=35, guided_eps=1e-4)
+        mask = Image.fromarray(np.clip(alpha * 255.0, 0.0, 255.0).astype(np.uint8), mode="L")
+        bbox = get_tight_bbox_from_mask(mask)
+        checks = compute_mask_artifact_checks(mask, bbox)
+
+        self.assertGreater(checks["maskAreaRatio"], 0.01)
+        self.assertGreaterEqual(checks["interiorOpaqueRatio"], 0.985)
+        self.assertLessEqual(checks["outsideLeakMeanAlpha"], 0.01)
+        self.assertFalse(self._mask_checks_are_bad(checks))
 
     def test_bbox_ignores_low_alpha_tails_and_fails_small_masks(self) -> None:
         mask_np = np.zeros((220, 360), dtype=np.uint8)

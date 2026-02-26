@@ -14,6 +14,8 @@ type StatusSuccess = {
   jobId?: string;
   outputUrl: string;
   workerBuildId?: string | null;
+  expectedWorkerImage?: string | null;
+  expectedWorkerImageDigest?: string | null;
   harmonyScore?: number;
   quality?: string | null;
   timings?: Record<string, number>;
@@ -99,6 +101,7 @@ export default function HomePage(): JSX.Element {
   const [harmonyScore, setHarmonyScore] = useState<number | null>(null);
   const [quality, setQuality] = useState<string | null>(null);
   const [workerBuildId, setWorkerBuildId] = useState<string | null>(null);
+  const [expectedWorkerImageDigest, setExpectedWorkerImageDigest] = useState<string | null>(null);
   const [detailPreservation, setDetailPreservation] = useState<StatusSuccess["detailPreservation"]>(null);
   const [artifactChecks, setArtifactChecks] = useState<StatusSuccess["artifactChecks"]>(null);
   const [guidance, setGuidance] = useState<string[]>([]);
@@ -243,6 +246,7 @@ export default function HomePage(): JSX.Element {
     setHarmonyScore(null);
     setQuality(null);
     setWorkerBuildId(null);
+    setExpectedWorkerImageDigest(null);
     setDetailPreservation(null);
     setArtifactChecks(null);
     setGuidance([]);
@@ -308,6 +312,7 @@ export default function HomePage(): JSX.Element {
           setHarmonyScore(status.harmonyScore ?? null);
           setQuality(status.quality ?? null);
           setWorkerBuildId(status.workerBuildId ?? null);
+          setExpectedWorkerImageDigest(status.expectedWorkerImageDigest ?? null);
           setDetailPreservation(status.detailPreservation ?? null);
           setArtifactChecks(status.artifactChecks ?? null);
           return;
@@ -399,6 +404,9 @@ export default function HomePage(): JSX.Element {
             <p className="text-sm font-semibold uppercase tracking-wide text-green-900">Completed</p>
             {activeJobId && <p className="mt-2 text-sm text-green-900">Job ID: {activeJobId}</p>}
             {workerBuildId && <p className="text-sm text-green-900">Worker build: {workerBuildId}</p>}
+            {expectedWorkerImageDigest && (
+              <p className="text-sm text-green-900">Expected image digest: {expectedWorkerImageDigest}</p>
+            )}
             <p className="mt-2 text-sm text-green-900">Harmony score: {harmonyScore ?? "n/a"}</p>
             <p className="text-sm text-green-900">Quality: {quality ?? "n/a"}</p>
             {detailPreservation && (

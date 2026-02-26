@@ -7,7 +7,7 @@ import { ensureReady } from "@/lib/ready-service";
 import { presignGet, presignPut } from "@/lib/r2";
 import { getJobState, getSetupState, patchJobState } from "@/lib/r2-state";
 import { getRunpodJobStatus, submitRunpodJob } from "@/lib/runpod-jobs";
-import { DEBUG_ARTIFACT_SPECS, type DebugArtifactName } from "@/lib/uploads";
+import { debugArtifactEntries, DEBUG_ARTIFACT_SPECS, type DebugArtifactName } from "@/lib/uploads";
 
 const paramsSchema = z.object({
   jobId: z.string().uuid()
@@ -42,26 +42,16 @@ type WorkerSuccessOutput = {
 
 type DebugUrls = Partial<Record<DebugArtifactName, string>>;
 
-function debugEntries(
-  keys?: Partial<Record<DebugArtifactName, string>>
-): Array<[DebugArtifactName, string]> {
-  if (!keys) {
-    return [];
-  }
-
-  return (Object.entries(keys) as Array<[DebugArtifactName, string | undefined]>).filter(
-    (entry): entry is [DebugArtifactName, string] => typeof entry[1] === "string" && entry[1].length > 0
-  );
-}
-
 type WorkerRejectedOutput = {
   status: "rejected";
+  workerBuildId?: string;
   score: number;
   guidance: string[];
 };
 
 type WorkerErrorOutput = {
   status: "error";
+  workerBuildId?: string;
   message: string;
 };
 
@@ -108,9 +98,9 @@ export async function GET(
         presignGet(job.input.carKey, 3600),
         presignGet(job.input.backgroundKey, 3600),
         presignPut(job.output.outputKey, "image/jpeg", 3600),
-        debugEntries(job.output.debugKeys).length > 0
+        debugArtifactEntries(job.output.debugKeys).length > 0
           ? Promise.all(
-              debugEntries(job.output.debugKeys).map(
+              debugArtifactEntries(job.output.debugKeys).map(
                 async ([artifactName, key]): Promise<[DebugArtifactName, string]> => [
                   artifactName,
                   await presignPut(key, DEBUG_ARTIFACT_SPECS[artifactName].contentType, 3600)
@@ -169,6 +159,8 @@ export async function GET(
       const reason = runpod.status.toLowerCase();
       return NextResponse.json({
         status: "error",
+        expectedWorkerImage: setup?.workerImage ?? null,
+        expectedWorkerImageDigest: setup?.workerImageDigest ?? null,
         message: runpod.error ?? `RunPod job ${reason}.`
       });
     }
@@ -186,6 +178,9 @@ export async function GET(
       const rejected = output as WorkerRejectedOutput;
       return NextResponse.json({
         status: "rejected",
+        workerBuildId: rejected.workerBuildId ?? null,
+        expectedWorkerImage: setup?.workerImage ?? null,
+        expectedWorkerImageDigest: setup?.workerImageDigest ?? null,
         score: rejected.score,
         guidance: rejected.guidance
       });
@@ -195,6 +190,9 @@ export async function GET(
       const workerError = output as WorkerErrorOutput;
       return NextResponse.json({
         status: "error",
+        workerBuildId: workerError.workerBuildId ?? null,
+        expectedWorkerImage: setup?.workerImage ?? null,
+        expectedWorkerImageDigest: setup?.workerImageDigest ?? null,
         message: workerError.message
       });
     }
@@ -202,9 +200,9 @@ export async function GET(
     const success = output as WorkerSuccessOutput;
     const [outputUrl, debugUrls] = await Promise.all([
       presignGet(job.output.outputKey, 60 * 60 * 24),
-      debugEntries(job.output.debugKeys).length > 0
+      debugArtifactEntries(job.output.debugKeys).length > 0
         ? Promise.all(
-            debugEntries(job.output.debugKeys).map(
+            debugArtifactEntries(job.output.debugKeys).map(
               async ([artifactName, key]): Promise<[DebugArtifactName, string]> => [
                 artifactName,
                 await presignGet(key, 60 * 60 * 24)
@@ -219,6 +217,8 @@ export async function GET(
       jobId: job.jobId,
       outputUrl,
       workerBuildId: success.workerBuildId ?? null,
+      expectedWorkerImage: setup?.workerImage ?? null,
+      expectedWorkerImageDigest: setup?.workerImageDigest ?? null,
       harmonyScore: success.harmonyScore,
       timings: success.timings ?? {},
       variant: success.variant ?? job.variant,
