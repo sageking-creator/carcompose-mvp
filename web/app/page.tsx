@@ -7,6 +7,11 @@ type ReadyResponse = {
   ready: boolean;
   phase: "provisioning" | "downloading_models" | "ready" | "error";
   message: string;
+  details?: {
+    workerImage?: string | null;
+    workerImageDigest?: string | null;
+    endpointId?: string | null;
+  };
 };
 
 type StatusSuccess = {
@@ -42,12 +47,18 @@ type StatusSuccess = {
 
 type StatusRejected = {
   status: "rejected";
+  workerBuildId?: string | null;
+  expectedWorkerImage?: string | null;
+  expectedWorkerImageDigest?: string | null;
   score: number;
   guidance: string[];
 };
 
 type StatusError = {
   status: "error";
+  workerBuildId?: string | null;
+  expectedWorkerImage?: string | null;
+  expectedWorkerImageDigest?: string | null;
   message: string;
 };
 
@@ -88,6 +99,7 @@ export default function HomePage(): JSX.Element {
     "awaiting-passcode"
   );
   const [readyMessage, setReadyMessage] = useState("Enter passcode to initialize system.");
+  const [readyWorkerDigest, setReadyWorkerDigest] = useState<string | null>(null);
 
   const [carFile, setCarFile] = useState<File | null>(null);
   const [backgroundFile, setBackgroundFile] = useState<File | null>(null);
@@ -101,6 +113,7 @@ export default function HomePage(): JSX.Element {
   const [harmonyScore, setHarmonyScore] = useState<number | null>(null);
   const [quality, setQuality] = useState<string | null>(null);
   const [workerBuildId, setWorkerBuildId] = useState<string | null>(null);
+  const [expectedWorkerImage, setExpectedWorkerImage] = useState<string | null>(null);
   const [expectedWorkerImageDigest, setExpectedWorkerImageDigest] = useState<string | null>(null);
   const [detailPreservation, setDetailPreservation] = useState<StatusSuccess["detailPreservation"]>(null);
   const [artifactChecks, setArtifactChecks] = useState<StatusSuccess["artifactChecks"]>(null);
@@ -161,6 +174,7 @@ export default function HomePage(): JSX.Element {
         }
 
         setReadyMessage(response.message);
+        setReadyWorkerDigest(response.details?.workerImageDigest ?? null);
         if (response.ready) {
           setReadyState("ready");
           return;
@@ -246,6 +260,7 @@ export default function HomePage(): JSX.Element {
     setHarmonyScore(null);
     setQuality(null);
     setWorkerBuildId(null);
+    setExpectedWorkerImage(null);
     setExpectedWorkerImageDigest(null);
     setDetailPreservation(null);
     setArtifactChecks(null);
@@ -293,12 +308,18 @@ export default function HomePage(): JSX.Element {
 
         if (status.status === "error") {
           setJobState("error");
+          setWorkerBuildId(status.workerBuildId ?? null);
+          setExpectedWorkerImage(status.expectedWorkerImage ?? null);
+          setExpectedWorkerImageDigest(status.expectedWorkerImageDigest ?? null);
           setErrorMessage(status.message);
           return;
         }
 
         if (status.status === "rejected") {
           setJobState("rejected");
+          setWorkerBuildId(status.workerBuildId ?? null);
+          setExpectedWorkerImage(status.expectedWorkerImage ?? null);
+          setExpectedWorkerImageDigest(status.expectedWorkerImageDigest ?? null);
           setHarmonyScore(status.score);
           setGuidance(status.guidance);
           return;
@@ -312,6 +333,7 @@ export default function HomePage(): JSX.Element {
           setHarmonyScore(status.harmonyScore ?? null);
           setQuality(status.quality ?? null);
           setWorkerBuildId(status.workerBuildId ?? null);
+          setExpectedWorkerImage(status.expectedWorkerImage ?? null);
           setExpectedWorkerImageDigest(status.expectedWorkerImageDigest ?? null);
           setDetailPreservation(status.detailPreservation ?? null);
           setArtifactChecks(status.artifactChecks ?? null);
@@ -362,6 +384,7 @@ export default function HomePage(): JSX.Element {
         <h2 className="font-display text-2xl text-ink">System State</h2>
         <p className="mt-3 text-sm uppercase tracking-[0.2em] text-black/50">{readyState}</p>
         <p className="mt-2 text-base text-black/75">{readyMessage}</p>
+        {readyWorkerDigest && <p className="mt-2 text-xs text-black/60">Expected worker digest: {readyWorkerDigest}</p>}
       </section>
 
       <section className="rounded-2xl border border-black/10 bg-white/70 p-6 shadow-lg shadow-black/5">
@@ -452,6 +475,10 @@ export default function HomePage(): JSX.Element {
         {jobState === "rejected" && (
           <div className="mt-4 rounded-xl border border-amber-700/30 bg-amber-50 p-4">
             <p className="text-sm font-semibold uppercase tracking-wide text-amber-900">Rejected</p>
+            {workerBuildId && <p className="mt-2 text-sm text-amber-900">Worker build: {workerBuildId}</p>}
+            {expectedWorkerImageDigest && (
+              <p className="text-sm text-amber-900">Expected image digest: {expectedWorkerImageDigest}</p>
+            )}
             <p className="mt-2 text-sm text-amber-900">Harmony score: {harmonyScore ?? "n/a"}</p>
             <ul className="mt-2 list-disc pl-5 text-sm text-amber-900">
               {guidance.map((item) => (
@@ -465,6 +492,11 @@ export default function HomePage(): JSX.Element {
           <div className="mt-4 rounded-xl border border-red-700/30 bg-red-50 p-4">
             <p className="text-sm font-semibold uppercase tracking-wide text-red-900">Error</p>
             <p className="mt-2 text-sm text-red-900">{errorMessage}</p>
+            {workerBuildId && <p className="mt-2 text-xs text-red-900">Worker build: {workerBuildId}</p>}
+            {expectedWorkerImageDigest && (
+              <p className="text-xs text-red-900">Expected image digest: {expectedWorkerImageDigest}</p>
+            )}
+            {expectedWorkerImage && <p className="text-xs text-red-900 break-all">Expected image: {expectedWorkerImage}</p>}
           </div>
         )}
       </section>
