@@ -1,4 +1,5 @@
 import { getEnv } from "@/lib/env";
+import { externalFetch } from "@/lib/external-fetch";
 
 const RUNPOD_REST_BASE_URL = "https://rest.runpod.io/v1";
 
@@ -22,7 +23,10 @@ export type RunpodEndpointRest = {
 
 async function runpodRest<T>(path: string, init?: RequestInit): Promise<T> {
   const env = getEnv();
-  const response = await fetch(`${RUNPOD_REST_BASE_URL}${path}`, {
+  const response = await externalFetch(`${RUNPOD_REST_BASE_URL}${path}`, {
+    service: "RunPod REST",
+    timeoutMs: 20_000,
+    retries: 2,
     ...init,
     headers: {
       Authorization: `Bearer ${env.RUNPOD_API_KEY}`,
@@ -71,4 +75,3 @@ export async function patchRunpodEndpointRest(
 export async function deleteRunpodEndpointRest(endpointId: string): Promise<void> {
   await runpodRest<void>(`/endpoints/${endpointId}`, { method: "DELETE" });
 }
-

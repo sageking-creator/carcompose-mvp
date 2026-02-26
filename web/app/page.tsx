@@ -36,9 +36,22 @@ type JobStatus = StatusSuccess | StatusRejected | StatusError | StatusProcessing
 const PASSCODE_STORAGE_KEY = "carcompose_passcode";
 
 async function parseApiJson(response: Response): Promise<any> {
-  const body = await response.json();
+  const text = await response.text();
+  let body: Record<string, unknown> = {};
+  if (text.trim().length > 0) {
+    try {
+      body = JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      body = { message: text };
+    }
+  }
+
   if (!response.ok) {
-    throw new Error(body.message ?? body.error ?? `Request failed (${response.status})`);
+    const message =
+      (typeof body.message === "string" && body.message.trim().length > 0 && body.message) ||
+      (typeof body.error === "string" && body.error.trim().length > 0 && body.error) ||
+      `Request failed (${response.status})`;
+    throw new Error(message);
   }
   return body;
 }
@@ -72,12 +85,19 @@ export default function HomePage(): JSX.Element {
         headers.set("Content-Type", "application/json");
       }
 
-      const response = await fetch(path, {
-        ...init,
-        headers
-      });
+      try {
+        const response = await fetch(path, {
+          ...init,
+          headers
+        });
 
-      return parseApiJson(response);
+        return parseApiJson(response);
+      } catch (error) {
+        if (error instanceof TypeError) {
+          throw new Error("Request failed before reaching the API. Check deployment/network and retry.");
+        }
+        throw error;
+      }
     },
     [passcode]
   );

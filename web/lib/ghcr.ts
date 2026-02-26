@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { externalFetch } from "@/lib/external-fetch";
 
 type GhcrImageRef = {
   repository: string;
@@ -74,7 +75,10 @@ async function fetchGhcrToken(
     headers.Authorization = buildBasicAuth(credentials);
   }
 
-  const response = await fetch(`https://ghcr.io/token?${params.toString()}`, {
+  const response = await externalFetch(`https://ghcr.io/token?${params.toString()}`, {
+    service: "GHCR token",
+    timeoutMs: 20_000,
+    retries: 2,
     method: "GET",
     headers,
     cache: "no-store"
@@ -126,9 +130,12 @@ export async function resolveGhcrImageToDigest(
   }
 
   const tokenData = await fetchGhcrToken(parsedImage, credentials);
-  const manifestResponse = await fetch(
+  const manifestResponse = await externalFetch(
     `https://ghcr.io/v2/${parsedImage.repository}/manifests/${encodeURIComponent(parsedImage.reference)}`,
     {
+      service: "GHCR manifest",
+      timeoutMs: 20_000,
+      retries: 2,
       method: "GET",
       headers: {
         Accept: MANIFEST_ACCEPT,

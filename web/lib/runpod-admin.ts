@@ -1,4 +1,5 @@
 import { getEnv } from "@/lib/env";
+import { externalFetch } from "@/lib/external-fetch";
 
 const RUNPOD_GRAPHQL_ENDPOINT = "https://api.runpod.io/graphql";
 
@@ -57,7 +58,10 @@ function isSchemaCompatibilityError(error: unknown): boolean {
 
 async function runpodGraphql<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
   const env = getEnv();
-  const response = await fetch(RUNPOD_GRAPHQL_ENDPOINT, {
+  const response = await externalFetch(RUNPOD_GRAPHQL_ENDPOINT, {
+    service: "RunPod GraphQL",
+    timeoutMs: 20_000,
+    retries: 2,
     method: "POST",
     headers: {
       "Content-Type": "application/json",

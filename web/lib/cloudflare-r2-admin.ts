@@ -1,4 +1,5 @@
 import { getEnv } from "@/lib/env";
+import { externalFetch } from "@/lib/external-fetch";
 
 const CLOUDFLARE_API = "https://api.cloudflare.com/client/v4";
 
@@ -10,7 +11,10 @@ type CloudflareResponse<T> = {
 
 async function cloudflareFetch<T>(path: string, init: RequestInit): Promise<CloudflareResponse<T>> {
   const env = getEnv();
-  const response = await fetch(`${CLOUDFLARE_API}${path}`, {
+  const response = await externalFetch(`${CLOUDFLARE_API}${path}`, {
+    service: "Cloudflare R2 API",
+    timeoutMs: 20_000,
+    retries: 2,
     ...init,
     headers: {
       "Content-Type": "application/json",

@@ -1,4 +1,5 @@
 import { getEnv } from "@/lib/env";
+import { externalFetch } from "@/lib/external-fetch";
 
 export type RunpodJobStatus = {
   status: string;
@@ -40,7 +41,10 @@ function getRunpodBaseUrl(endpointId: string): string {
 
 export async function submitRunpodJob(endpointId: string, input: Record<string, unknown>): Promise<string> {
   const env = getEnv();
-  const response = await fetch(`${getRunpodBaseUrl(endpointId)}/run`, {
+  const response = await externalFetch(`${getRunpodBaseUrl(endpointId)}/run`, {
+    service: "RunPod run",
+    timeoutMs: 20_000,
+    retries: 2,
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -59,7 +63,10 @@ export async function submitRunpodJob(endpointId: string, input: Record<string, 
 
 export async function getRunpodJobStatus(endpointId: string, jobId: string): Promise<RunpodJobStatus> {
   const env = getEnv();
-  const response = await fetch(`${getRunpodBaseUrl(endpointId)}/status/${jobId}`, {
+  const response = await externalFetch(`${getRunpodBaseUrl(endpointId)}/status/${jobId}`, {
+    service: "RunPod status",
+    timeoutMs: 20_000,
+    retries: 2,
     headers: {
       Authorization: `Bearer ${env.RUNPOD_API_KEY}`
     }
@@ -75,7 +82,10 @@ export async function getRunpodJobStatus(endpointId: string, jobId: string): Pro
 
 export async function getRunpodHealth(endpointId: string): Promise<RunpodHealth> {
   const env = getEnv();
-  const response = await fetch(`${getRunpodBaseUrl(endpointId)}/health`, {
+  const response = await externalFetch(`${getRunpodBaseUrl(endpointId)}/health`, {
+    service: "RunPod health",
+    timeoutMs: 20_000,
+    retries: 2,
     headers: {
       Authorization: `Bearer ${env.RUNPOD_API_KEY}`
     }
@@ -91,7 +101,10 @@ export async function getRunpodHealth(endpointId: string): Promise<RunpodHealth>
 
 export async function getRunpodRequests(endpointId: string): Promise<RunpodRequests> {
   const env = getEnv();
-  const response = await fetch(`${getRunpodBaseUrl(endpointId)}/requests`, {
+  const response = await externalFetch(`${getRunpodBaseUrl(endpointId)}/requests`, {
+    service: "RunPod requests",
+    timeoutMs: 20_000,
+    retries: 2,
     headers: {
       Authorization: `Bearer ${env.RUNPOD_API_KEY}`
     }
@@ -113,7 +126,10 @@ export type RunpodPurgeQueueResult = {
 
 export async function purgeRunpodQueue(endpointId: string): Promise<RunpodPurgeQueueResult> {
   const env = getEnv();
-  const response = await fetch(`${getRunpodBaseUrl(endpointId)}/purge-queue`, {
+  const response = await externalFetch(`${getRunpodBaseUrl(endpointId)}/purge-queue`, {
+    service: "RunPod purge-queue",
+    timeoutMs: 20_000,
+    retries: 2,
     method: "POST",
     headers: {
       Authorization: `Bearer ${env.RUNPOD_API_KEY}`
@@ -136,7 +152,10 @@ export type RunpodCancelJobResult = {
 
 export async function cancelRunpodJob(endpointId: string, jobId: string): Promise<RunpodCancelJobResult> {
   const env = getEnv();
-  const response = await fetch(`${getRunpodBaseUrl(endpointId)}/cancel/${jobId}`, {
+  const response = await externalFetch(`${getRunpodBaseUrl(endpointId)}/cancel/${jobId}`, {
+    service: "RunPod cancel-job",
+    timeoutMs: 20_000,
+    retries: 2,
     method: "POST",
     headers: {
       Authorization: `Bearer ${env.RUNPOD_API_KEY}`
