@@ -35,6 +35,8 @@ const envSchema = z.object({
   PIPELINE_VARIANT: z.enum(["core", "full"]).default("core"),
   MODEL_CACHE_DIR: z.string().default("/runpod-volume/models"),
   HF_HOME: z.string().default("/runpod-volume/hf_cache"),
+  MAX_OUTPUT_LONG_EDGE: z.coerce.number().int().positive().default(2048),
+  OUTPUT_RESIZE_MODE: z.enum(["preserve", "stretch"]).default("preserve"),
   WORKER_IMAGE: z.string().optional(),
   GHCR_USERNAME: z.string().optional(),
   GHCR_TOKEN: z.string().optional(),

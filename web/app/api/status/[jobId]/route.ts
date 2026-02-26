@@ -18,6 +18,11 @@ type WorkerSuccessOutput = {
   timings?: Record<string, number>;
   variant?: "core" | "full";
   quality?: string;
+  detailPreservation?: {
+    hfRatio?: number;
+    method?: string;
+    fallbackReason?: string;
+  };
 };
 
 type WorkerRejectedOutput = {
@@ -163,7 +168,8 @@ export async function GET(
       harmonyScore: success.harmonyScore,
       timings: success.timings ?? {},
       variant: success.variant ?? job.variant,
-      quality: success.quality ?? null
+      quality: success.quality ?? null,
+      detailPreservation: success.detailPreservation ?? null
     });
   } catch (error) {
     return jsonError(error, 400);

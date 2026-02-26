@@ -14,9 +14,9 @@ def download_image(url: str) -> Image.Image:
 
 
 
-def upload_image_put(url: str, image: Image.Image, quality: int = 95) -> None:
+def upload_image_put(url: str, image: Image.Image, quality: int = 97) -> None:
     output = BytesIO()
-    image.save(output, format="JPEG", quality=quality)
+    image.save(output, format="JPEG", quality=max(1, min(quality, 100)), subsampling=0, optimize=True)
     output.seek(0)
     response = requests.put(url, data=output.read(), headers={"Content-Type": "image/jpeg"}, timeout=120)
     response.raise_for_status()
@@ -33,8 +33,28 @@ def validate_image(image: Image.Image, name: str, max_pixels: int) -> None:
 
 
 
-def fit_background(background: Image.Image, size: Tuple[int, int]) -> Image.Image:
-    return background.resize(size, Image.Resampling.LANCZOS)
+def fit_background(
+    background: Image.Image,
+    max_output_long_edge: int,
+    resize_mode: str = "preserve",
+    target_size: Tuple[int, int] | None = None,
+) -> Image.Image:
+    bg_rgb = background.convert("RGB")
+    if resize_mode == "stretch" and target_size:
+        return bg_rgb.resize(target_size, Image.Resampling.LANCZOS)
+
+    if max_output_long_edge <= 0:
+        return bg_rgb
+
+    bg_w, bg_h = bg_rgb.size
+    long_edge = max(bg_w, bg_h)
+    if long_edge <= max_output_long_edge:
+        return bg_rgb
+
+    scale = float(max_output_long_edge) / float(long_edge)
+    new_w = max(1, int(round(bg_w * scale)))
+    new_h = max(1, int(round(bg_h * scale)))
+    return bg_rgb.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
 
 

@@ -109,7 +109,9 @@ function getTemplateEnv(env: AppEnv): Array<{ key: string; value: string }> {
     { key: "CLIP_MODEL_DIR", value: `${cacheDir}/controlcom/openai-clip-vit-large-patch14` },
     { key: "CUDA_VISIBLE_DEVICES", value: "0" },
     { key: "PYTORCH_CUDA_ALLOC_CONF", value: "max_split_size_mb:512" },
-    { key: "PIPELINE_VARIANT", value: env.PIPELINE_VARIANT }
+    { key: "PIPELINE_VARIANT", value: env.PIPELINE_VARIANT },
+    { key: "MAX_OUTPUT_LONG_EDGE", value: String(env.MAX_OUTPUT_LONG_EDGE) },
+    { key: "OUTPUT_RESIZE_MODE", value: env.OUTPUT_RESIZE_MODE }
   ];
 }
 

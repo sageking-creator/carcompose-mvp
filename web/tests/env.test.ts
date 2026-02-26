@@ -32,3 +32,18 @@ test("getEnv throws clear error when required env is missing", () => {
     resetEnvCacheForTests();
   }
 });
+
+test("getEnv applies worker output defaults", () => {
+  const snapshot = { ...process.env };
+  try {
+    process.env = { ...requiredEnv } as NodeJS.ProcessEnv;
+    resetEnvCacheForTests();
+
+    const env = getEnv();
+    assert.equal(env.MAX_OUTPUT_LONG_EDGE, 2048);
+    assert.equal(env.OUTPUT_RESIZE_MODE, "preserve");
+  } finally {
+    process.env = snapshot as NodeJS.ProcessEnv;
+    resetEnvCacheForTests();
+  }
+});
