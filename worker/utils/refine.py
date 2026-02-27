@@ -79,7 +79,33 @@ def _decontaminate_foreground_rgb(image_rgb: np.ndarray, alpha: np.ndarray) -> n
     output[edge] = ((1.0 - blend_weight[edge]) * image_rgb[edge]) + (
         blend_weight[edge] * foreground_estimate[edge]
     )
-    return np.clip(output, 0.0, 1.0)
+    output = np.clip(output, 0.0, 1.0)
+
+    # Defringe: dilate premultiplied RGB outward so semi-transparent edge pixels do not
+    # carry the source background color. This is identity-preserving because it only
+    # affects pixels where alpha is already low (outside the hard mask).
+    try:
+        height, width = alpha.shape
+        long_edge = max(height, width)
+        radius = int(np.clip(round(long_edge * 0.003), 2, 6))
+        kernel = _ellipse_kernel(radius)
+
+        alpha_f = np.clip(alpha.astype(np.float32), 0.0, 1.0)
+        premult = output * alpha_f[..., None]
+
+        premult_dil = cv2.dilate(premult.astype(np.float32), kernel, iterations=1)
+        alpha_dil = cv2.dilate(alpha_f.astype(np.float32), kernel, iterations=1)
+        rgb_dil = premult_dil / np.maximum(alpha_dil, 1e-4)[..., None]
+        rgb_dil = np.clip(rgb_dil, 0.0, 1.0)
+
+        # Only replace outside the hard edge, where bleeding is visible.
+        fringe = np.logical_and(alpha_f > 0.001, alpha_f < 0.50)
+        if fringe.any():
+            output[fringe] = rgb_dil[fringe]
+    except Exception:
+        pass
+
+    return output
 
 
 @dataclass(frozen=True)
@@ -220,7 +246,13 @@ def _tighten_alpha_from_core(
     tightened = np.zeros_like(alpha, dtype=np.float32)
     tightened[solid > 0] = 1.0
     if edge_band.any():
-        tightened[edge_band] = np.clip(np.minimum(alpha_soft[edge_band], 0.58), 0.0, 0.58)
+        edge_vals = np.clip(alpha_soft[edge_band], 0.0, 1.0)
+        # Keep a narrow, low-alpha outside band to reduce halo visibility while preserving AA.
+        edge_cap = 0.48  # must stay < 0.5 to remain outside after 8-bit quantization
+        edge_vals = np.minimum(edge_vals, edge_cap)
+        gamma = 2.4
+        edge_vals = edge_cap * np.power(edge_vals / max(edge_cap, 1e-6), gamma)
+        tightened[edge_band] = np.clip(edge_vals, 0.0, edge_cap)
     return np.clip(tightened, 0.0, 1.0)
 
 

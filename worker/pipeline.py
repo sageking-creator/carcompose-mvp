@@ -152,6 +152,7 @@ def place_car_on_background(
     car_rgba_refined: Image.Image,
     tight_bbox: Tuple[int, int, int, int],
     bg_image: Image.Image,
+    studio_background: bool,
 ) -> tuple[Image.Image, Tuple[int, int, int, int], Image.Image, Image.Image]:
     """
     Paste refined RGBA car onto background, sized to fill ~70% of background width and
@@ -169,7 +170,10 @@ def place_car_on_background(
     tb_h = max(1, tight_bbox[3] - tight_bbox[1])
     aspect = tb_w / tb_h
 
-    car_w = int(bg_w * 0.70)
+    width_ratio = 0.82 if studio_background else 0.70
+    ground_ratio = 0.90 if studio_background else 0.85
+
+    car_w = int(bg_w * width_ratio)
     car_h = int(car_w / max(aspect, 1e-6))
     if car_h > int(bg_h * 0.80):
         car_h = int(bg_h * 0.80)
@@ -185,7 +189,7 @@ def place_car_on_background(
     car_placed_rgba = Image.merge("RGBA", (*placed_foreground_rgb.split(), placed_mask))
 
     x = (bg_w - car_w) // 2
-    y = int(bg_h * 0.85) - car_h
+    y = int(bg_h * ground_ratio) - car_h
     y = max(0, min(y, bg_h - car_h))
 
     canvas = bg_image.copy().convert("RGBA")
@@ -236,6 +240,7 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
         resize_mode=settings.output_resize_mode,
         target_size=(settings.target_width, settings.target_height),
     )
+    studio_background = is_studio_background(bg_proc)
 
     logger.info(f"[{job_id}] Step 1: BiRefNet segmentation + edge refinement...")
     t0 = _now_s()
@@ -284,7 +289,10 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
 
     tight_bbox = source_bbox
     composite_raw, placement_bbox, placed_mask, placed_foreground_rgb = place_car_on_background(
-        car_rgba_refined=car_rgba_refined, tight_bbox=tight_bbox, bg_image=bg_proc
+        car_rgba_refined=car_rgba_refined,
+        tight_bbox=tight_bbox,
+        bg_image=bg_proc,
+        studio_background=studio_background,
     )
     _emit_debug_artifact(
         settings=settings,
@@ -420,7 +428,6 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
     contact_shadow_applied = False
     glass_mode_applied = "off"
     studio_mode_applied = "off"
-    studio_background = is_studio_background(bg_proc)
 
     if variant == "core":
         try:

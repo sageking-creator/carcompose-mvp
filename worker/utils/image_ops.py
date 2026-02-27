@@ -119,7 +119,17 @@ def reharden_resized_alpha(mask_crop_resized: Image.Image, edge_px: int | None =
     alpha_soft = cv2.GaussianBlur(alpha, (0, 0), sigmaX=max(1.0, band_px / 2.0), sigmaY=max(1.0, band_px / 2.0))
     out = np.zeros_like(alpha, dtype=np.float32)
     out[solid > 0] = 1.0
-    out[edge_band] = np.clip(alpha_soft[edge_band], 0.0, 1.0)
+    edge_inside = np.logical_and(edge_band, hard > 0)
+    edge_outside = np.logical_and(edge_band, hard == 0)
+    out[edge_inside] = 1.0
+
+    if edge_outside.any():
+        edge_vals = np.clip(alpha_soft[edge_outside], 0.0, 1.0)
+        edge_cap = 0.48  # must stay < 0.5 to remain outside after 8-bit quantization
+        edge_vals = np.minimum(edge_vals, edge_cap)
+        gamma = 2.4
+        edge_vals = edge_cap * np.power(edge_vals / max(edge_cap, 1e-6), gamma)
+        out[edge_outside] = np.clip(edge_vals, 0.0, edge_cap)
     out_u8 = np.clip(out * 255.0, 0.0, 255.0).astype(np.uint8)
     return Image.fromarray(out_u8, mode="L")
 
@@ -582,6 +592,16 @@ def _apply_contact_shadow_v2(
     if y_offset > 0:
         contour_seed = np.roll(contour_seed, shift=y_offset, axis=0)
         contour_seed[:y_offset, :] = 0.0
+
+    # Reduce unrealistic “bumper shadow” by emphasizing wheel contact zones over the centerline.
+    if bbox_w >= 64:
+        x = np.linspace(0.0, 1.0, bbox_w, dtype=np.float32)
+        sigma = 0.16
+        w_left = np.exp(-0.5 * ((x - 0.28) / sigma) ** 2)
+        w_right = np.exp(-0.5 * ((x - 0.72) / sigma) ** 2)
+        weights = w_left + w_right
+        weights = weights / max(float(weights.max()), 1e-6)
+        contour_seed[:, x1:x2] = contour_seed[:, x1:x2] * weights[None, :]
 
     floor_mask = cv2.dilate(floor_mask, np.ones((1, 9), np.uint8), iterations=1)
     sigma_x = max(4.0, float(bbox_w) * 0.02)
