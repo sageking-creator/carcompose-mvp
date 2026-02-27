@@ -183,6 +183,5 @@ if [[ "$CLEANUP" == "true" ]]; then
   fi
 
   echo "==> Cleaning R2 keys for jobId=${JOB_ID} targets=${TARGETS}"
-  (cd web && npx tsx ../scripts/r2-prune-job.ts --job-id "${JOB_ID}" --delete "${TARGETS}" --yes)
+  (cd web && npx tsx scripts/r2-prune-job.ts --job-id "${JOB_ID}" --delete "${TARGETS}" --yes)
 fi
-

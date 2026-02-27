@@ -5,7 +5,7 @@ type DeleteTarget = "debug" | "uploads" | "outputs" | "jobs";
 function usage(): void {
   // eslint-disable-next-line no-console
   console.log(`Usage:
-  cd web && npx tsx ../scripts/r2-prune-job.ts --job-id <uuid> [--delete debug,uploads,outputs,jobs|--all] [--yes]
+  npx tsx scripts/r2-prune-job.ts --job-id <uuid> [--delete debug,uploads,outputs,jobs|--all] [--yes]
 
 Description:
   Deletes R2 objects for a specific jobId (useful to control storage costs during debugging).
@@ -179,7 +179,8 @@ async function main(): Promise<void> {
         }
       })
     );
-    deleted += resp.Deleted?.length ?? 0;
+    const errors = resp.Errors?.length ?? 0;
+    deleted += batch.length - errors;
     if (resp.Errors && resp.Errors.length > 0) {
       // eslint-disable-next-line no-console
       console.error(`Delete errors:`, resp.Errors);
@@ -187,7 +188,7 @@ async function main(): Promise<void> {
   }
 
   // eslint-disable-next-line no-console
-  console.log(`Deleted: ${deleted}/${keys.length}`);
+  console.log(`Deleted (attempted): ${deleted}/${keys.length}`);
 }
 
 main().catch((error) => {
@@ -195,4 +196,3 @@ main().catch((error) => {
   console.error(String(error));
   process.exitCode = 1;
 });
-

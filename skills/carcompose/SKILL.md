@@ -94,7 +94,7 @@ description: Workflow + invariants for CarCompose (Vercel orchestrator + R2 stat
   - Run: `/Users/Hikmet.Erdil/Documents/autobot/scripts/run-test-job.sh` (supports `--cleanup`).
 - Preserve remote debug upload contract (`debug_put_urls`) so worker failures are diagnosable without attaching to pods.
 - Cost control: R2 lifecycle rules delete `debug/` after 1 day, but during rapid iteration prune per-job objects:
-  - `cd /Users/Hikmet.Erdil/Documents/autobot/web && npx tsx ../scripts/r2-prune-job.ts --job-id <uuid> --delete debug,uploads,jobs --yes`
+  - `cd /Users/Hikmet.Erdil/Documents/autobot/web && npx tsx scripts/r2-prune-job.ts --job-id <uuid> --delete debug,uploads,jobs --yes`
 
 ## When editing the pipeline
 
