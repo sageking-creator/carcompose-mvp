@@ -253,6 +253,10 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
         target_size=(settings.target_width, settings.target_height),
     )
     studio_background = is_studio_background(bg_proc)
+    if settings.studio_mode == "on":
+        studio_background = True
+    elif settings.studio_mode == "off":
+        studio_background = False
 
     logger.info(f"[{job_id}] Step 1: BiRefNet segmentation + edge refinement...")
     t0 = _now_s()

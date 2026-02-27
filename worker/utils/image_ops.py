@@ -638,24 +638,30 @@ def is_studio_background(image: Image.Image) -> bool:
     if height < 16 or width < 16:
         return False
 
-    # Focus on a crop that avoids the floor/turntable edge lines and bottom-right watermark.
+    # Focus on the upper wall region. This avoids the floor rings/edges and the
+    # bottom-right watermark that can distort “texture” heuristics.
     y1 = int(round(height * 0.05))
-    y2 = int(round(height * 0.68))
-    x1 = int(round(width * 0.10))
-    x2 = int(round(width * 0.90))
+    y2 = int(round(height * 0.60))
+    x1 = int(round(width * 0.08))
+    x2 = int(round(width * 0.92))
     y2 = max(y1 + 8, min(y2, height))
     x2 = max(x1 + 8, min(x2, width))
     crop = rgb_u8[y1:y2, x1:x2]
-
-    gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY).astype(np.float32)
-    lap = np.abs(cv2.Laplacian(gray, cv2.CV_32F, ksize=3))
-    texture_score = float(np.percentile(lap, 80))
 
     hsv = cv2.cvtColor(crop, cv2.COLOR_RGB2HSV).astype(np.float32)
     sat_mean = float(np.mean(hsv[:, :, 1] / 255.0))
     value_std = float(np.std(hsv[:, :, 2] / 255.0))
 
-    return texture_score < 12.0 and sat_mean < 0.22 and value_std < 0.28
+    # High-pass residual is more robust than raw Laplacian percentiles for “smooth studios”.
+    gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY).astype(np.float32)
+    blur = cv2.GaussianBlur(gray, (0, 0), sigmaX=3.0, sigmaY=3.0)
+    highpass = np.abs(gray - blur)
+    texture_p95 = float(np.percentile(highpass, 95))
+
+    lab = cv2.cvtColor(crop, cv2.COLOR_RGB2LAB).astype(np.float32)
+    ab_std = float(np.mean(np.std(lab[:, :, 1:3], axis=(0, 1))))
+
+    return sat_mean < 0.10 and value_std < 0.20 and texture_p95 < 10.0 and ab_std < 6.0
 
 
 def estimate_turntable_alignment(image: Image.Image) -> dict[str, int] | None:
@@ -667,44 +673,119 @@ def estimate_turntable_alignment(image: Image.Image) -> dict[str, int] | None:
     or None when detection is unreliable.
     """
     rgb_u8 = np.array(image.convert("RGB"), dtype=np.uint8)
-    gray = cv2.cvtColor(rgb_u8, cv2.COLOR_RGB2GRAY).astype(np.float32)
-    height, width = gray.shape[:2]
+    height, width = rgb_u8.shape[:2]
     if height < 64 or width < 64:
         return None
 
-    y1 = int(round(height * 0.66))
-    y2 = int(round(height * 0.93))
-    x1 = int(round(width * 0.15))
-    x2 = int(round(width * 0.85))
-    if y2 <= y1 + 8 or x2 <= x1 + 8:
+    # Downscale for speed and robustness of morphology/contours.
+    scale = 1.0
+    max_width = 900
+    if width > max_width:
+        scale = max_width / float(width)
+        new_w = max(64, int(round(width * scale)))
+        new_h = max(64, int(round(height * scale)))
+        rgb_u8 = cv2.resize(rgb_u8, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        height, width = rgb_u8.shape[:2]
+
+    gray_u8 = cv2.cvtColor(rgb_u8, cv2.COLOR_RGB2GRAY)
+
+    # Bottom ROI where the turntable rim lives (avoid top wall/ceiling).
+    roi_y1 = int(round(height * 0.50))
+    roi_y2 = int(round(height * 0.99))
+    roi_x1 = int(round(width * 0.05))
+    roi_x2 = int(round(width * 0.95))
+    if roi_y2 <= roi_y1 + 16 or roi_x2 <= roi_x1 + 16:
         return None
 
-    roi = gray[y1:y2, x1:x2]
-    grad_y = np.abs(cv2.Sobel(roi, cv2.CV_32F, 0, 1, ksize=3))
-    if grad_y.size == 0:
+    roi = gray_u8[roi_y1:roi_y2, roi_x1:roi_x2]
+    if roi.size == 0:
         return None
 
-    max_vals = grad_y.max(axis=0)
-    y_idxs = grad_y.argmax(axis=0)
-    if max_vals.size == 0:
+    roi_h, roi_w = roi.shape[:2]
+    max_kernel = _odd_kernel_size(max(5, min(roi_h, roi_w) - 1))
+    if max_kernel < 5:
         return None
 
-    threshold = float(np.percentile(max_vals, 82))
-    threshold = max(threshold, 8.0)
-    good = max_vals >= threshold
-    if int(good.sum()) < max(40, int(0.25 * max_vals.size)):
+    # Search a few stable presets; pick the best ellipse candidate.
+    kernel_sizes = [15, 21, 31]
+    percentiles = [96.0, 97.0]
+
+    best: tuple[float, float, float, float, float] | None = None
+    best_score = -1.0
+
+    for base_k in kernel_sizes:
+        k_size = min(_odd_kernel_size(base_k), max_kernel)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_size, k_size))
+        blackhat = cv2.morphologyEx(roi, cv2.MORPH_BLACKHAT, kernel)
+        blackhat = cv2.GaussianBlur(blackhat, (0, 0), sigmaX=1.2, sigmaY=1.2)
+
+        for perc in percentiles:
+            threshold = float(np.percentile(blackhat, perc))
+            threshold = max(threshold, 6.0)
+            binary = (blackhat >= threshold).astype(np.uint8) * 255
+            binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8), iterations=1)
+            binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8), iterations=1)
+
+            contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+            if not contours:
+                continue
+
+            for contour in contours:
+                if len(contour) < 320:
+                    continue
+                try:
+                    ellipse = cv2.fitEllipse(contour)
+                except cv2.error:
+                    continue
+                (cx, cy), (a, b), angle = ellipse
+                major = float(max(a, b))
+                minor = float(min(a, b))
+
+                cx_full = float(cx + roi_x1)
+                cy_full = float(cy + roi_y1)
+
+                # Basic sanity filters.
+                if major < 0.45 * width or major > 1.50 * width:
+                    continue
+                if minor < 0.10 * height or minor > 0.80 * height:
+                    continue
+                aspect = major / max(minor, 1e-6)
+                if aspect < 1.5 or aspect > 9.0:
+                    continue
+                if cx_full < 0.18 * width or cx_full > 0.82 * width:
+                    continue
+                if cy_full < 0.55 * height or cy_full > 0.98 * height:
+                    continue
+
+                score = major * minor
+                if score > best_score:
+                    best_score = score
+                    best = (cx_full, cy_full, major, minor, float(angle))
+
+    if best is None:
         return None
 
-    xs = np.where(good)[0] + x1
-    ys = y_idxs[good] + y1
+    cx_full, cy_full, major, minor, angle = best
 
-    span_w = int(xs.max() - xs.min() + 1)
-    if span_w < int(width * 0.25):
-        return None
+    center_x = int(round(cx_full / scale))
+    center_y = int(round(cy_full / scale))
+    major_axis = int(round(major / scale))
+    minor_axis = int(round(minor / scale))
 
-    center_x = int(round((xs.max() + xs.min()) / 2.0))
-    ground_y = int(np.median(ys))
-    return {"centerX": center_x, "groundY": ground_y, "spanW": span_w}
+    # Ground estimate: slightly below ellipse center along the minor axis.
+    ground_factor = 0.85
+    ground_y = int(round(center_y + (minor_axis / 2.0) * ground_factor))
+    ground_y = max(0, min(ground_y, int(round(image.size[1])) - 1))
+
+    return {
+        "centerX": center_x,
+        "groundY": ground_y,
+        "spanW": major_axis,
+        "centerY": center_y,
+        "majorAxis": major_axis,
+        "minorAxis": minor_axis,
+        "angle": int(round(angle)),
+    }
 
 
 def apply_glass_normalization(

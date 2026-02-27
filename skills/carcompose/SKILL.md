@@ -88,7 +88,13 @@ description: Workflow + invariants for CarCompose (Vercel orchestrator + R2 stat
 - Maintain a repeatable loop: enable debug -> run job -> inspect `/api/status/:jobId` debug URLs -> tune -> rerun.
 - `GET /api/status/:jobId` returns `debugUrls` even for `status=error|rejected` when `DEBUG_ARTIFACTS=true`.
 - Use `/Users/Hikmet.Erdil/Documents/autobot/scripts/fetch-debug-artifacts.sh` to download `status.json` + debug images into `tmp/debug-jobs/<jobId>/`.
+- Prefer the repo's `test-images/` pair for consistent end-to-end debugging:
+  - `/Users/Hikmet.Erdil/Documents/autobot/test-images/car_image.jpg`
+  - `/Users/Hikmet.Erdil/Documents/autobot/test-images/background.png`
+  - Run: `/Users/Hikmet.Erdil/Documents/autobot/scripts/run-test-job.sh` (supports `--cleanup`).
 - Preserve remote debug upload contract (`debug_put_urls`) so worker failures are diagnosable without attaching to pods.
+- Cost control: R2 lifecycle rules delete `debug/` after 1 day, but during rapid iteration prune per-job objects:
+  - `cd /Users/Hikmet.Erdil/Documents/autobot/web && npx tsx ../scripts/r2-prune-job.ts --job-id <uuid> --delete debug,uploads,jobs --yes`
 
 ## When editing the pipeline
 
