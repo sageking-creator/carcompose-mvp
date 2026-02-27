@@ -64,6 +64,25 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+async function presignDebugUrls(
+  debugKeys: Partial<Record<DebugArtifactName, string>> | undefined
+): Promise<DebugUrls | null> {
+  const entries = debugArtifactEntries(debugKeys);
+  if (entries.length === 0) {
+    return null;
+  }
+
+  const signed = await Promise.all(
+    entries.map(
+      async ([artifactName, key]): Promise<[DebugArtifactName, string]> => [
+        artifactName,
+        await presignGet(key, 60 * 60 * 24)
+      ]
+    )
+  );
+  return Object.fromEntries(signed) as DebugUrls;
+}
+
 export async function GET(
   request: Request,
   context: { params: { jobId: string } }
@@ -160,10 +179,12 @@ export async function GET(
       runpod.status === "ABORTED"
     ) {
       const reason = runpod.status.toLowerCase();
+      const debugUrls = await presignDebugUrls(job.output.debugKeys);
       return NextResponse.json({
         status: "error",
         expectedWorkerImage: setup?.workerImage ?? null,
         expectedWorkerImageDigest: setup?.workerImageDigest ?? null,
+        debugUrls,
         message: runpod.error ?? `RunPod job ${reason}.`
       });
     }
@@ -179,23 +200,27 @@ export async function GET(
 
     if ((output as WorkerRejectedOutput).status === "rejected") {
       const rejected = output as WorkerRejectedOutput;
+      const debugUrls = await presignDebugUrls(job.output.debugKeys);
       return NextResponse.json({
         status: "rejected",
         workerBuildId: rejected.workerBuildId ?? null,
         expectedWorkerImage: setup?.workerImage ?? null,
         expectedWorkerImageDigest: setup?.workerImageDigest ?? null,
         score: rejected.score,
-        guidance: rejected.guidance
+        guidance: rejected.guidance,
+        debugUrls
       });
     }
 
     if ((output as WorkerErrorOutput).status === "error") {
       const workerError = output as WorkerErrorOutput;
+      const debugUrls = await presignDebugUrls(job.output.debugKeys);
       return NextResponse.json({
         status: "error",
         workerBuildId: workerError.workerBuildId ?? null,
         expectedWorkerImage: setup?.workerImage ?? null,
         expectedWorkerImageDigest: setup?.workerImageDigest ?? null,
+        debugUrls,
         message: workerError.message
       });
     }
@@ -203,16 +228,7 @@ export async function GET(
     const success = output as WorkerSuccessOutput;
     const [outputUrl, debugUrls] = await Promise.all([
       presignGet(job.output.outputKey, 60 * 60 * 24),
-      debugArtifactEntries(job.output.debugKeys).length > 0
-        ? Promise.all(
-            debugArtifactEntries(job.output.debugKeys).map(
-              async ([artifactName, key]): Promise<[DebugArtifactName, string]> => [
-                artifactName,
-                await presignGet(key, 60 * 60 * 24)
-              ]
-            )
-          ).then((entries) => Object.fromEntries(entries) as DebugUrls)
-        : Promise.resolve(undefined)
+      presignDebugUrls(job.output.debugKeys)
     ]);
 
     return NextResponse.json({
@@ -228,7 +244,7 @@ export async function GET(
       quality: success.quality ?? null,
       detailPreservation: success.detailPreservation ?? null,
       artifactChecks: success.artifactChecks ?? null,
-      debugUrls: debugUrls ?? null
+      debugUrls
     });
   } catch (error) {
     return jsonError(error, 400);

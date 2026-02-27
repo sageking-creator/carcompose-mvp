@@ -77,7 +77,9 @@ def resize_rgba_premultiplied(
 
 def get_tight_bbox_from_mask(mask: Image.Image, min_area_ratio: float = 0.005) -> Tuple[int, int, int, int]:
     mask_np = np.array(mask.convert("L"), dtype=np.uint8)
-    hard = mask_np >= 127
+    # Use a threshold consistent with alpha>=0.5 (128/255 ≈ 0.502) to avoid including
+    # low-alpha halos in the bbox.
+    hard = mask_np >= 128
     area_ratio = float(hard.mean())
     if area_ratio < float(min_area_ratio):
         raise InvalidInputError(
@@ -125,10 +127,13 @@ def reharden_resized_alpha(mask_crop_resized: Image.Image, edge_px: int | None =
 
     if edge_outside.any():
         edge_vals = np.clip(alpha_soft[edge_outside], 0.0, 1.0)
-        edge_cap = 0.48  # must stay < 0.5 to remain outside after 8-bit quantization
-        edge_vals = np.minimum(edge_vals, edge_cap)
-        gamma = 2.4
-        edge_vals = edge_cap * np.power(edge_vals / max(edge_cap, 1e-6), gamma)
+        # Leak-safe AA: keep only a thin, low-alpha outside band so the car does not
+        # “fog” the background. This is intentionally capped at <= 0.12 so the near-leak
+        # p95 gate can pass and ControlCom can run when otherwise safe.
+        edge_cap = 0.12
+        edge_vals = np.minimum(edge_vals, 0.5)
+        gamma = 2.2
+        edge_vals = edge_cap * np.power(edge_vals / 0.5, gamma)
         out[edge_outside] = np.clip(edge_vals, 0.0, edge_cap)
     out_u8 = np.clip(out * 255.0, 0.0, 255.0).astype(np.uint8)
     return Image.fromarray(out_u8, mode="L")
@@ -628,16 +633,78 @@ def apply_contact_shadow(
 
 
 def is_studio_background(image: Image.Image) -> bool:
-    rgb = np.array(image.convert("RGB"), dtype=np.float32) / 255.0
-    gray = cv2.cvtColor((rgb * 255.0).astype(np.uint8), cv2.COLOR_RGB2GRAY).astype(np.float32)
+    rgb_u8 = np.array(image.convert("RGB"), dtype=np.uint8)
+    height, width = rgb_u8.shape[:2]
+    if height < 16 or width < 16:
+        return False
+
+    # Focus on a crop that avoids the floor/turntable edge lines and bottom-right watermark.
+    y1 = int(round(height * 0.05))
+    y2 = int(round(height * 0.68))
+    x1 = int(round(width * 0.10))
+    x2 = int(round(width * 0.90))
+    y2 = max(y1 + 8, min(y2, height))
+    x2 = max(x1 + 8, min(x2, width))
+    crop = rgb_u8[y1:y2, x1:x2]
+
+    gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY).astype(np.float32)
     lap = np.abs(cv2.Laplacian(gray, cv2.CV_32F, ksize=3))
     texture_score = float(np.percentile(lap, 80))
 
-    hsv = cv2.cvtColor((rgb * 255.0).astype(np.uint8), cv2.COLOR_RGB2HSV).astype(np.float32)
+    hsv = cv2.cvtColor(crop, cv2.COLOR_RGB2HSV).astype(np.float32)
     sat_mean = float(np.mean(hsv[:, :, 1] / 255.0))
     value_std = float(np.std(hsv[:, :, 2] / 255.0))
 
     return texture_score < 12.0 and sat_mean < 0.22 and value_std < 0.28
+
+
+def estimate_turntable_alignment(image: Image.Image) -> dict[str, int] | None:
+    """
+    Best-effort heuristic for studio “turntable” backgrounds.
+
+    Returns:
+      {"centerX": int, "groundY": int, "spanW": int}
+    or None when detection is unreliable.
+    """
+    rgb_u8 = np.array(image.convert("RGB"), dtype=np.uint8)
+    gray = cv2.cvtColor(rgb_u8, cv2.COLOR_RGB2GRAY).astype(np.float32)
+    height, width = gray.shape[:2]
+    if height < 64 or width < 64:
+        return None
+
+    y1 = int(round(height * 0.66))
+    y2 = int(round(height * 0.93))
+    x1 = int(round(width * 0.15))
+    x2 = int(round(width * 0.85))
+    if y2 <= y1 + 8 or x2 <= x1 + 8:
+        return None
+
+    roi = gray[y1:y2, x1:x2]
+    grad_y = np.abs(cv2.Sobel(roi, cv2.CV_32F, 0, 1, ksize=3))
+    if grad_y.size == 0:
+        return None
+
+    max_vals = grad_y.max(axis=0)
+    y_idxs = grad_y.argmax(axis=0)
+    if max_vals.size == 0:
+        return None
+
+    threshold = float(np.percentile(max_vals, 82))
+    threshold = max(threshold, 8.0)
+    good = max_vals >= threshold
+    if int(good.sum()) < max(40, int(0.25 * max_vals.size)):
+        return None
+
+    xs = np.where(good)[0] + x1
+    ys = y_idxs[good] + y1
+
+    span_w = int(xs.max() - xs.min() + 1)
+    if span_w < int(width * 0.25):
+        return None
+
+    center_x = int(round((xs.max() + xs.min()) / 2.0))
+    ground_y = int(np.median(ys))
+    return {"centerX": center_x, "groundY": ground_y, "spanW": span_w}
 
 
 def apply_glass_normalization(

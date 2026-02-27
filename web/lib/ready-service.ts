@@ -121,6 +121,8 @@ function getTemplateEnv(env: AppEnv): Array<{ key: string; value: string }> {
     { key: "CONTACT_SHADOW_MODE", value: env.CONTACT_SHADOW_MODE },
     { key: "GLASS_NORMALIZATION_MODE", value: env.GLASS_NORMALIZATION_MODE },
     { key: "STUDIO_MODE", value: env.STUDIO_MODE },
+    { key: "STUDIO_CAR_WIDTH_RATIO", value: String(env.STUDIO_CAR_WIDTH_RATIO) },
+    { key: "STUDIO_GROUND_RATIO", value: String(env.STUDIO_GROUND_RATIO) },
     { key: "MAX_EDGE_HALO_MEAN_DELTA", value: String(env.MAX_EDGE_HALO_MEAN_DELTA) },
     { key: "MAX_EDGE_BAND_WIDTH_PX", value: String(env.MAX_EDGE_BAND_WIDTH_PX) },
     { key: "DEBUG_ARTIFACTS", value: env.DEBUG_ARTIFACTS ? "1" : "0" }

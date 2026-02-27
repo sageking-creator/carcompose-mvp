@@ -45,6 +45,8 @@ const envSchema = z.object({
   CONTACT_SHADOW_MODE: z.enum(["v1", "v2"]).default("v2"),
   GLASS_NORMALIZATION_MODE: z.enum(["off", "auto", "force"]).default("off"),
   STUDIO_MODE: z.enum(["off", "auto", "on"]).default("auto"),
+  STUDIO_CAR_WIDTH_RATIO: z.coerce.number().min(0.4).max(0.95).default(0.82),
+  STUDIO_GROUND_RATIO: z.coerce.number().min(0.6).max(0.98).default(0.9),
   MAX_EDGE_HALO_MEAN_DELTA: z.coerce.number().positive().default(14),
   MAX_EDGE_BAND_WIDTH_PX: z.coerce.number().positive().default(7.5),
   DEBUG_ARTIFACTS: z

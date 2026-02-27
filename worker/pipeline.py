@@ -31,6 +31,7 @@ from utils.image_ops import (
     compute_edge_halo_stats,
     compute_mask_artifact_checks,
     compute_detail_preservation_ratio,
+    estimate_turntable_alignment,
     get_tight_bbox_from_mask,
     is_studio_background,
     paste_mask_into_background,
@@ -153,6 +154,8 @@ def place_car_on_background(
     tight_bbox: Tuple[int, int, int, int],
     bg_image: Image.Image,
     studio_background: bool,
+    studio_car_width_ratio: float,
+    studio_ground_ratio: float,
 ) -> tuple[Image.Image, Tuple[int, int, int, int], Image.Image, Image.Image]:
     """
     Paste refined RGBA car onto background, sized to fill ~70% of background width and
@@ -170,10 +173,14 @@ def place_car_on_background(
     tb_h = max(1, tight_bbox[3] - tight_bbox[1])
     aspect = tb_w / tb_h
 
-    width_ratio = 0.82 if studio_background else 0.70
-    ground_ratio = 0.90 if studio_background else 0.85
+    width_ratio = float(studio_car_width_ratio) if studio_background else 0.70
+    ground_ratio = float(studio_ground_ratio) if studio_background else 0.85
 
-    car_w = int(bg_w * width_ratio)
+    alignment = estimate_turntable_alignment(bg_image) if studio_background else None
+    if alignment:
+        car_w = min(int(bg_w * width_ratio), int(alignment["spanW"] * 0.98))
+    else:
+        car_w = int(bg_w * width_ratio)
     car_h = int(car_w / max(aspect, 1e-6))
     if car_h > int(bg_h * 0.80):
         car_h = int(bg_h * 0.80)
@@ -188,9 +195,14 @@ def place_car_on_background(
     placed_foreground_rgb = Image.fromarray(rgb_np, mode="RGB")
     car_placed_rgba = Image.merge("RGBA", (*placed_foreground_rgb.split(), placed_mask))
 
-    x = (bg_w - car_w) // 2
-    y = int(bg_h * ground_ratio) - car_h
+    if alignment:
+        x = int(alignment["centerX"] - (car_w / 2.0))
+        y = int(alignment["groundY"] - car_h)
+    else:
+        x = (bg_w - car_w) // 2
+        y = int(bg_h * ground_ratio) - car_h
     y = max(0, min(y, bg_h - car_h))
+    x = max(0, min(x, bg_w - car_w))
 
     canvas = bg_image.copy().convert("RGBA")
     canvas.paste(car_placed_rgba, (x, y), car_placed_rgba)
@@ -293,6 +305,8 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
         tight_bbox=tight_bbox,
         bg_image=bg_proc,
         studio_background=studio_background,
+        studio_car_width_ratio=settings.studio_car_width_ratio,
+        studio_ground_ratio=settings.studio_ground_ratio,
     )
     _emit_debug_artifact(
         settings=settings,

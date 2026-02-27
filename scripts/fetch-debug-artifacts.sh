@@ -117,14 +117,15 @@ fi
 
 echo "==> Final status: ${STATUS_VALUE:-unknown}"
 
+EXIT_CODE=0
 if [[ "$STATUS_VALUE" == "error" ]]; then
   echo "Worker/API error: $(jq -r '.message // "unknown error"' "${STATUS_FILE}")" >&2
-  exit 2
-fi
-
-if [[ "$STATUS_VALUE" != "success" ]]; then
+  EXIT_CODE=2
+elif [[ "$STATUS_VALUE" == "rejected" ]]; then
+  echo "Job rejected: $(jq -r '.score // empty' "${STATUS_FILE}")" >&2
+  EXIT_CODE=3
+elif [[ "$STATUS_VALUE" != "success" ]]; then
   echo "Job not in success state. Raw status saved to ${STATUS_FILE}"
-  exit 0
 fi
 
 OUTPUT_URL="$(jq -r '.outputUrl // empty' "${STATUS_FILE}")"
@@ -148,3 +149,4 @@ fi
 
 echo "==> Saved artifacts to ${OUT_DIR}"
 echo "==> status.json: ${STATUS_FILE}"
+exit "$EXIT_CODE"

@@ -20,6 +20,8 @@ class Settings:
     contact_shadow_mode: str
     glass_normalization_mode: str
     studio_mode: str
+    studio_car_width_ratio: float
+    studio_ground_ratio: float
     target_width: int
     target_height: int
     max_edge_halo_mean_delta: float
@@ -59,6 +61,8 @@ def get_settings() -> Settings:
         contact_shadow_mode=os.getenv("CONTACT_SHADOW_MODE", "v2").lower(),
         glass_normalization_mode=os.getenv("GLASS_NORMALIZATION_MODE", "off").lower(),
         studio_mode=os.getenv("STUDIO_MODE", "auto").lower(),
+        studio_car_width_ratio=float(os.getenv("STUDIO_CAR_WIDTH_RATIO", "0.82")),
+        studio_ground_ratio=float(os.getenv("STUDIO_GROUND_RATIO", "0.90")),
         target_width=int(os.getenv("TARGET_WIDTH", "1920")),
         target_height=int(os.getenv("TARGET_HEIGHT", "1280")),
         max_edge_halo_mean_delta=float(os.getenv("MAX_EDGE_HALO_MEAN_DELTA", "14.0")),

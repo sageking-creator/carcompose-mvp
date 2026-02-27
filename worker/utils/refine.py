@@ -234,25 +234,29 @@ def _tighten_alpha_from_core(
     if constrained.max() == 0:
         return alpha
 
-    edge_px = int(np.clip(round(long_edge * 0.0025), 2, 7))
+    edge_px = int(np.clip(round(long_edge * 0.0018), 1, 4))
     edge_kernel = _ellipse_kernel(edge_px)
     solid = cv2.erode(constrained, edge_kernel)
     if solid.max() == 0:
         solid = constrained
     dilated = cv2.dilate(constrained, edge_kernel)
     edge_band = np.logical_and(dilated > 0, solid == 0)
+    edge_inside = np.logical_and(edge_band, constrained > 0)
+    edge_outside = np.logical_and(edge_band, constrained == 0)
 
     alpha_soft = cv2.GaussianBlur(alpha, (0, 0), sigmaX=max(0.8, edge_px / 2.0), sigmaY=max(0.8, edge_px / 2.0))
     tightened = np.zeros_like(alpha, dtype=np.float32)
     tightened[solid > 0] = 1.0
-    if edge_band.any():
-        edge_vals = np.clip(alpha_soft[edge_band], 0.0, 1.0)
+    tightened[edge_inside] = 1.0
+    if edge_outside.any():
+        edge_vals = np.clip(alpha_soft[edge_outside], 0.0, 1.0)
         # Keep a narrow, low-alpha outside band to reduce halo visibility while preserving AA.
-        edge_cap = 0.48  # must stay < 0.5 to remain outside after 8-bit quantization
-        edge_vals = np.minimum(edge_vals, edge_cap)
-        gamma = 2.4
-        edge_vals = edge_cap * np.power(edge_vals / max(edge_cap, 1e-6), gamma)
-        tightened[edge_band] = np.clip(edge_vals, 0.0, edge_cap)
+        # This cap is intentionally <= 0.12 so near-leak p95 stays below the guidance gate.
+        edge_cap = 0.12
+        edge_vals = np.minimum(edge_vals, 0.5)
+        gamma = 2.2
+        edge_vals = edge_cap * np.power(edge_vals / 0.5, gamma)
+        tightened[edge_outside] = np.clip(edge_vals, 0.0, edge_cap)
     return np.clip(tightened, 0.0, 1.0)
 
 

@@ -57,6 +57,8 @@ description: Workflow + invariants for CarCompose (Vercel orchestrator + R2 stat
 - `CONTROLCOM_CKPT=/runpod-volume/models/controlcom/ControlCom_blend_harm.pth`
 - `CLIP_MODEL_DIR=/runpod-volume/models/controlcom/openai-clip-vit-large-patch14`
 - `PIPELINE_VARIANT=core|full`
+- `STUDIO_CAR_WIDTH_RATIO=0.82` (studio placement scale)
+- `STUDIO_GROUND_RATIO=0.90` (studio placement ground anchor)
 
 ### Init job: `action="download_models"`
 
@@ -84,12 +86,15 @@ description: Workflow + invariants for CarCompose (Vercel orchestrator + R2 stat
 - Keep stage-level diagnostics available (mask placement, harmonization, artifact checks).
 - Debug outputs should be retrievable outside the worker runtime so failures can be audited after job completion.
 - Maintain a repeatable loop: enable debug -> run job -> inspect `/api/status/:jobId` debug URLs -> tune -> rerun.
+- `GET /api/status/:jobId` returns `debugUrls` even for `status=error|rejected` when `DEBUG_ARTIFACTS=true`.
+- Use `/Users/Hikmet.Erdil/Documents/autobot/scripts/fetch-debug-artifacts.sh` to download `status.json` + debug images into `tmp/debug-jobs/<jobId>/`.
 - Preserve remote debug upload contract (`debug_put_urls`) so worker failures are diagnosable without attaching to pods.
 
 ## When editing the pipeline
 
 - Keep worker **idempotent** and side-effect free aside from uploading to `output_put_url`.
 - Preserve identity details (logos, plates, trim) as a hard requirement while harmonizing.
+- Studio placement uses a best-effort turntable alignment heuristic; keep env knobs so it can be tuned without code changes.
 - If you add/change required worker env vars:
   - Update `getTemplateEnv()` in `/Users/Hikmet.Erdil/Documents/autobot/web/lib/ready-service.ts`
   - Ensure the provisioning hash input includes the change (so a new template/endpoint is created).
