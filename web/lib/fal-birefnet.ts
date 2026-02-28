@@ -123,8 +123,41 @@ export type FalBirefnetResult = {
   requestId: string;
   maskUrl: string;
   maskBytes: Buffer;
+  cutoutUrl?: string;
+  cutoutBytes?: Buffer;
+  cutoutContentType?: string;
   contentType: string;
 };
+
+function extractCutoutUrl(payload: unknown): string | null {
+  const record = toRecord(payload);
+  if (!record) {
+    return null;
+  }
+
+  const candidates: unknown[] = [
+    record.image,
+    toRecord(record.response)?.image,
+    toRecord(record.output)?.image,
+    toRecord(toRecord(record.data)?.output)?.image,
+    record.cutout,
+    toRecord(record.response)?.cutout,
+    toRecord(record.output)?.cutout
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.startsWith("http")) {
+      return candidate;
+    }
+    const candidateRecord = toRecord(candidate);
+    const url = candidateRecord?.url;
+    if (typeof url === "string" && url.startsWith("http")) {
+      return url;
+    }
+  }
+
+  return null;
+}
 
 export async function generateFalBirefnetMask(config: FalBirefnetConfig): Promise<FalBirefnetResult> {
   const submitResponse = await falRequest(FAL_QUEUE_URL, config.apiKey, {
@@ -198,6 +231,7 @@ export async function generateFalBirefnetMask(config: FalBirefnetConfig): Promis
   if (!maskUrl) {
     throw new Error("fal result missing mask URL");
   }
+  const cutoutUrl = extractCutoutUrl(resultPayload) ?? undefined;
 
   const maskDownload = await externalFetch(maskUrl, {
     service: "fal.ai mask download",
@@ -217,10 +251,32 @@ export async function generateFalBirefnetMask(config: FalBirefnetConfig): Promis
     throw new Error("fal mask download returned empty body");
   }
 
+  let cutoutBytes: Buffer | undefined;
+  let cutoutContentType: string | undefined;
+  if (cutoutUrl) {
+    const cutoutDownload = await externalFetch(cutoutUrl, {
+      service: "fal.ai cutout download",
+      method: "GET",
+      timeoutMs: 60_000,
+      retries: 2
+    });
+    if (cutoutDownload.ok) {
+      const rawContentType = cutoutDownload.headers.get("content-type") ?? "image/png";
+      cutoutContentType = rawContentType.split(";")[0].trim() || "image/png";
+      const downloadedCutout = Buffer.from(await cutoutDownload.arrayBuffer());
+      if (downloadedCutout.byteLength > 0) {
+        cutoutBytes = downloadedCutout;
+      }
+    }
+  }
+
   return {
     requestId,
     maskUrl,
     maskBytes: bytes,
+    cutoutUrl,
+    cutoutBytes,
+    cutoutContentType,
     contentType: contentType || "image/png"
   };
 }

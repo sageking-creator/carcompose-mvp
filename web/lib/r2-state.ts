@@ -32,6 +32,7 @@ export type JobState = {
     carKey: string;
     backgroundKey: string;
     maskKey?: string;
+    cutoutKey?: string;
     maskBackend?: "local" | "fal";
   };
   output: {

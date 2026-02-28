@@ -36,6 +36,7 @@ export type CompositeRunpodInput = {
   job_id: string;
   car_image_url: string;
   car_mask_url?: string;
+  car_cutout_url?: string;
   background_image_url: string;
   output_put_url: string;
   pipeline_variant: "core" | "full";
@@ -97,6 +98,7 @@ export function buildCompositeRunpodInput(args: {
   jobId: string;
   carImageUrl: string;
   carMaskUrl?: string;
+  carCutoutUrl?: string;
   backgroundImageUrl: string;
   outputPutUrl: string;
   pipelineVariant: "core" | "full";
@@ -119,6 +121,9 @@ export function buildCompositeRunpodInput(args: {
 
   if (args.carMaskUrl) {
     payload.car_mask_url = args.carMaskUrl;
+  }
+  if (args.carCutoutUrl) {
+    payload.car_cutout_url = args.carCutoutUrl;
   }
 
   if (debugArtifactEntries(args.debugPutUrls).length > 0) {

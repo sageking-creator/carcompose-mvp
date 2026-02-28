@@ -61,6 +61,7 @@ export async function POST(request: Request): Promise<NextResponse> {
     const debugKeys = env.DEBUG_ARTIFACTS ? buildDebugArtifactKeys(payload.jobId) : undefined;
     let maskBackend = resolveMaskBackend(env);
     let maskKey: string | undefined;
+    let cutoutKey: string | undefined;
 
     if (maskBackend === "fal") {
       const carImageUrlForFal = await presignGet(carKey, 15 * 60);
@@ -76,10 +77,15 @@ export async function POST(request: Request): Promise<NextResponse> {
 
         maskKey = `masks/${payload.jobId}/fal_mask.png`;
         await putBytes(maskKey, falResult.maskBytes, falResult.contentType || "image/png");
+        if (falResult.cutoutBytes && falResult.cutoutBytes.byteLength > 0) {
+          cutoutKey = `masks/${payload.jobId}/fal_cutout.png`;
+          await putBytes(cutoutKey, falResult.cutoutBytes, falResult.cutoutContentType || "image/png");
+        }
       } catch (error) {
         if (env.MASK_BACKEND === "auto") {
           maskBackend = "local";
           maskKey = undefined;
+          cutoutKey = undefined;
         } else {
           throw error;
         }
@@ -98,9 +104,10 @@ export async function POST(request: Request): Promise<NextResponse> {
     let runpodEndpointId: string | undefined;
 
     if (canSubmitNow && endpointId) {
-      const [carImageUrl, carMaskUrl, backgroundImageUrl, outputPutUrl, debugPutUrls] = await Promise.all([
+      const [carImageUrl, carMaskUrl, carCutoutUrl, backgroundImageUrl, outputPutUrl, debugPutUrls] = await Promise.all([
         presignGet(carKey, 3600),
         maskKey ? presignGet(maskKey, 3600) : Promise.resolve(undefined),
+        cutoutKey ? presignGet(cutoutKey, 3600) : Promise.resolve(undefined),
         presignGet(backgroundKey, 3600),
         presignPut(outputKey, "image/jpeg", 3600),
         debugKeys
@@ -121,6 +128,7 @@ export async function POST(request: Request): Promise<NextResponse> {
           jobId: payload.jobId,
           carImageUrl,
           carMaskUrl,
+          carCutoutUrl,
           backgroundImageUrl,
           outputPutUrl,
           pipelineVariant: env.PIPELINE_VARIANT,
@@ -141,6 +149,7 @@ export async function POST(request: Request): Promise<NextResponse> {
         carKey,
         backgroundKey,
         maskKey,
+        cutoutKey,
         maskBackend
       },
       output: {

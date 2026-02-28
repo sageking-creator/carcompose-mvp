@@ -261,8 +261,37 @@ def place_car_on_background(
     strict_pixels = np.where(placed_mask_u8 >= 230)
     strict_rows = strict_pixels[0]
     if strict_rows.size > 0:
-        strict_bottom_local = int(strict_rows.max())
-        strict_center_local_x = int(round(float(np.mean(strict_pixels[1]))))
+        strict_cols = strict_pixels[1]
+        if strict_cols.size >= 16:
+            col_min = int(strict_cols.min())
+            col_max = int(strict_cols.max())
+            per_col_bottom: list[int] = []
+            per_col_index: list[int] = []
+            for col in range(col_min, col_max + 1):
+                rows_for_col = np.where(placed_mask_u8[:, col] >= 230)[0]
+                if rows_for_col.size == 0:
+                    continue
+                per_col_bottom.append(int(rows_for_col.max()))
+                per_col_index.append(col)
+
+            if per_col_bottom:
+                bottoms = np.array(per_col_bottom, dtype=np.float32)
+                # Robust ground-contact estimate: ignore tiny outlier spikes beneath the car.
+                strict_bottom_local = int(np.clip(np.percentile(bottoms, 88), 0, car_h - 1))
+                contact_cols = np.array(
+                    [col for col, row in zip(per_col_index, per_col_bottom) if row >= strict_bottom_local - 2],
+                    dtype=np.float32,
+                )
+                if contact_cols.size > 0:
+                    strict_center_local_x = int(round(float(np.median(contact_cols))))
+                else:
+                    strict_center_local_x = int(round(float(np.mean(strict_cols))))
+            else:
+                strict_bottom_local = int(strict_rows.max())
+                strict_center_local_x = int(round(float(np.mean(strict_cols))))
+        else:
+            strict_bottom_local = int(strict_rows.max())
+            strict_center_local_x = int(round(float(np.mean(strict_cols))))
     else:
         fallback_rows = np.where(placed_mask_u8 >= 1)[0]
         strict_bottom_local = int(fallback_rows.max()) if fallback_rows.size > 0 else car_h - 1
@@ -292,6 +321,7 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
     job_id = payload.get("job_id")
     car_url = payload.get("car_image_url")
     car_mask_url = payload.get("car_mask_url")
+    car_cutout_url = payload.get("car_cutout_url")
     background_url = payload.get("background_image_url")
     output_put_url = payload.get("output_put_url")
 
@@ -316,7 +346,8 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
                 debug_put_urls[key] = value
 
     use_external_mask = isinstance(car_mask_url, str) and car_mask_url.strip() != ""
-    models = get_models(settings, variant=variant, require_segmenter=not use_external_mask)
+    use_external_cutout = isinstance(car_cutout_url, str) and car_cutout_url.strip() != ""
+    models = get_models(settings, variant=variant, require_segmenter=not (use_external_mask or use_external_cutout))
     timings: Dict[str, float] = {}
 
     logger.info(f"[{job_id}] Downloading inputs...")
@@ -342,8 +373,26 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
     logger.info(f"[{job_id}] Step 1: foreground extraction + edge refinement...")
     t0 = _now_s()
     external_prob_map: np.ndarray | None = None
+    external_cutout_rgba: Image.Image | None = None
     alpha_source: np.ndarray | None = None
-    if use_external_mask:
+    if use_external_cutout:
+        external_cutout = download_image_raw(str(car_cutout_url))
+        external_cutout_rgba = external_cutout.convert("RGBA")
+        if external_cutout_rgba.size != car_image.size:
+            external_cutout_rgba = external_cutout_rgba.resize(car_image.size, Image.Resampling.LANCZOS)
+
+        cutout_alpha = np.array(external_cutout_rgba.getchannel("A"), dtype=np.float32) / 255.0
+        alpha, _ = build_hardened_alpha(external_cutout_rgba.convert("RGB"), cutout_alpha, mode="strict")
+        alpha_source = alpha
+        car_mask = Image.fromarray(np.clip(alpha * 255.0, 0.0, 255.0).astype(np.uint8), mode="L")
+
+        cutout_rgb_np = np.array(external_cutout_rgba.convert("RGB"), dtype=np.uint8)
+        cutout_rgb_np[alpha <= 0.01] = 0
+        car_rgba_refined = Image.fromarray(
+            np.dstack((cutout_rgb_np, np.clip(alpha * 255.0, 0.0, 255.0).astype(np.uint8))),
+            mode="RGBA",
+        )
+    elif use_external_mask:
         external_mask_image = download_image_raw(str(car_mask_url))
         if "A" in external_mask_image.getbands():
             external_prob_map = np.array(external_mask_image.getchannel("A"), dtype=np.float32) / 255.0
@@ -361,7 +410,13 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
         car_mask, car_rgba_refined = models["segmenter"].segment(car_image, alpha_mode="auto")
         alpha_source = np.array(car_mask, dtype=np.float32) / 255.0
 
-    if settings.enable_vitmatte and studio_background and "vitmatte" in models and alpha_source is not None:
+    if (
+        settings.enable_vitmatte
+        and studio_background
+        and "vitmatte" in models
+        and alpha_source is not None
+        and not use_external_cutout
+    ):
         trimap = _build_vitmatte_trimap(alpha_source)
         _emit_debug_artifact(
             settings=settings,
@@ -397,7 +452,20 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
             f"near={source_checks['nearLeakMeanAlpha']:.4f}, "
             f"area={source_checks['maskAreaRatio']:.4f}); retrying strict alpha mode."
         )
-        if external_prob_map is not None:
+        if use_external_cutout:
+            if external_cutout_rgba is None:
+                raise InvalidInputError("car_cutout_url", "External cutout was requested but not loaded.")
+            cutout_alpha = np.array(external_cutout_rgba.getchannel("A"), dtype=np.float32) / 255.0
+            alpha, _ = build_hardened_alpha(external_cutout_rgba.convert("RGB"), cutout_alpha, mode="strict")
+            alpha_source = alpha
+            car_mask = Image.fromarray(np.clip(alpha * 255.0, 0.0, 255.0).astype(np.uint8), mode="L")
+            cutout_rgb_np = np.array(external_cutout_rgba.convert("RGB"), dtype=np.uint8)
+            cutout_rgb_np[alpha <= 0.01] = 0
+            car_rgba_refined = Image.fromarray(
+                np.dstack((cutout_rgb_np, np.clip(alpha * 255.0, 0.0, 255.0).astype(np.uint8))),
+                mode="RGBA",
+            )
+        elif external_prob_map is not None:
             alpha, _ = build_hardened_alpha(car_image, external_prob_map, mode="strict")
             alpha_source = alpha
             car_mask = Image.fromarray(np.clip(alpha * 255.0, 0.0, 255.0).astype(np.uint8), mode="L")

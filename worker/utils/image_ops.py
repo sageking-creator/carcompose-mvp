@@ -517,20 +517,45 @@ def defringe_to_target_background(
     rx2 = min(width, x2 + pad)
     ry2 = min(height, y2 + pad)
 
-    edge_band = np.logical_and(alpha_np > 0.02, alpha_np < max(0.05, float(edge_alpha_max)))
+    edge_band = np.logical_and(alpha_np > 0.005, alpha_np < max(0.05, float(edge_alpha_max)))
     scope = np.zeros_like(edge_band, dtype=bool)
     scope[ry1:ry2, rx1:rx2] = True
     edge_band = np.logical_and(edge_band, scope)
     if not edge_band.any():
         return composite_rgb
 
-    # Pull semi-transparent boundary pixels toward the target background
-    # to suppress source-background color contamination around wheels/underbody.
-    weight = _smoothstep(0.15, max(0.2, float(edge_alpha_max)), 1.0 - alpha_np)
-    weight = np.clip(weight, 0.0, 1.0) * edge_band.astype(np.float32)
-    weight3 = weight[..., None]
+    hard_core = np.logical_and(alpha_np >= 0.98, scope)
+    core_pixels = np.column_stack(np.where(hard_core))
+    if core_pixels.size == 0:
+        return composite_rgb
 
-    output = (composite_np * (1.0 - weight3)) + (background_np * weight3)
+    # Nearest core color propagation: in a studio setup halos are usually edge RGB
+    # contamination, not alpha leakage. Pull edge pixels toward a recomposited color
+    # derived from nearby opaque foreground and target background.
+    distance_input = np.where(hard_core, 0, 255).astype(np.uint8)
+    _, labels = cv2.distanceTransformWithLabels(
+        distance_input,
+        cv2.DIST_L2,
+        5,
+        labelType=cv2.DIST_LABEL_PIXEL,
+    )
+    label_idx = np.clip(labels.astype(np.int32) - 1, 0, len(core_pixels) - 1)
+    nearest_core = core_pixels[label_idx]
+    core_rgb = composite_np[nearest_core[:, :, 0], nearest_core[:, :, 1]]
+
+    alpha3 = alpha_np[..., None]
+    target = (core_rgb * alpha3) + (background_np * (1.0 - alpha3))
+
+    edge_upper = float(np.clip(edge_alpha_max, 0.18, 0.95))
+    replace_weight = _smoothstep(0.03, edge_upper, 1.0 - alpha_np)
+    replace_weight = np.clip(replace_weight, 0.0, 1.0) * edge_band.astype(np.float32)
+    # Keep low-alpha boundary fully background-consistent.
+    replace_weight[np.logical_and(edge_band, alpha_np <= 0.08)] = 1.0
+    # Preserve identity inside strong-alpha edge pixels.
+    replace_weight[alpha_np >= 0.70] *= 0.45
+
+    weight3 = replace_weight[..., None]
+    output = (composite_np * (1.0 - weight3)) + (target * weight3)
     return Image.fromarray(np.clip(output, 0.0, 255.0).astype(np.uint8), mode="RGB")
 
 

@@ -16,6 +16,7 @@ from utils.image_ops import (
     apply_contact_shadow,
     apply_glass_normalization,
     compute_mask_artifact_checks,
+    defringe_to_target_background,
     get_tight_bbox_from_mask,
     resize_rgba_premultiplied,
 )
@@ -206,6 +207,49 @@ class QualityOpsTests(unittest.TestCase):
         outside = alpha_np < 0.01
         self.assertTrue(bool(outside.any()))
         self.assertLess(float(rgb_np[outside].mean()), 0.03)
+
+    def test_defringe_reduces_edge_color_contamination(self) -> None:
+        width, height = 240, 160
+        background_np = np.full((height, width, 3), 190, dtype=np.uint8)
+        composite_np = background_np.copy()
+        mask_np = np.zeros((height, width), dtype=np.uint8)
+
+        x1, y1, x2, y2 = 50, 35, 190, 125
+        mask_np[y1:y2, x1:x2] = 255
+        # Add a soft outside ring to mimic anti-aliased boundary pixels.
+        mask_np[y1 - 2 : y2 + 2, x1 - 2 : x2 + 2] = np.maximum(mask_np[y1 - 2 : y2 + 2, x1 - 2 : x2 + 2], 40)
+
+        alpha = mask_np.astype(np.float32) / 255.0
+        clean_fg = np.full((height, width, 3), [70, 70, 70], dtype=np.float32)
+        contaminated_fg = clean_fg.copy()
+        ring = np.logical_and(alpha > 0.01, alpha < 0.5)
+        contaminated_fg[ring] = np.array([175, 215, 245], dtype=np.float32)
+        composite_np = (
+            (contaminated_fg * alpha[..., None])
+            + (background_np.astype(np.float32) * (1.0 - alpha[..., None]))
+        ).astype(np.uint8)
+        expected_clean_composite = (
+            (clean_fg * alpha[..., None])
+            + (background_np.astype(np.float32) * (1.0 - alpha[..., None]))
+        ).astype(np.float32)
+
+        background = Image.fromarray(background_np, mode="RGB")
+        composite = Image.fromarray(composite_np, mode="RGB")
+        mask = Image.fromarray(mask_np, mode="L")
+
+        before = np.array(composite, dtype=np.float32)
+        corrected = defringe_to_target_background(
+            composite_image=composite,
+            background_image=background,
+            foreground_mask=mask,
+            foreground_bbox=(x1, y1, x2, y2),
+            edge_alpha_max=0.45,
+        )
+        after = np.array(corrected, dtype=np.float32)
+
+        before_err = float(np.mean(np.abs(before[ring] - expected_clean_composite[ring])))
+        after_err = float(np.mean(np.abs(after[ring] - expected_clean_composite[ring])))
+        self.assertLess(after_err, before_err * 0.60)
 
 
 if __name__ == "__main__":

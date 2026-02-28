@@ -112,3 +112,21 @@ test("buildCompositeRunpodInput includes car_mask_url when provided", () => {
 
   assert.equal(payload.car_mask_url, "https://example.com/car-mask");
 });
+
+test("buildCompositeRunpodInput includes car_cutout_url when provided", () => {
+  const payload = buildCompositeRunpodInput({
+    jobId: "job-1",
+    carImageUrl: "https://example.com/car",
+    carCutoutUrl: "https://example.com/car-cutout",
+    backgroundImageUrl: "https://example.com/bg",
+    outputPutUrl: "https://example.com/out",
+    pipelineVariant: "core",
+    options: {
+      harmonyThreshold: 0.65,
+      shadowStrength: 0.85,
+      reflectionStrength: 0.6
+    }
+  });
+
+  assert.equal(payload.car_cutout_url, "https://example.com/car-cutout");
+});
