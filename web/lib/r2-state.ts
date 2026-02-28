@@ -19,6 +19,7 @@ export type SetupState = {
   lastFailoverAt?: string;
   failoverCount?: number;
   initJobId?: string;
+  initJobStartedAt?: string;
   initJobStatus: InitJobStatus;
   updatedAt: string;
 };

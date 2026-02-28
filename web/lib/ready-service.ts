@@ -780,7 +780,11 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
     const initJobId = await submitRunpodJob(endpointId, {
       action: "download_models"
     });
-    setup = await putSetupState({ initJobId, initJobStatus: "RUNNING" });
+    setup = await putSetupState({
+      initJobId,
+      initJobStatus: "RUNNING",
+      initJobStartedAt: new Date().toISOString()
+    });
 
     return {
       ready: false,
@@ -797,7 +801,16 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
     };
   }
 
-  const initStatus = await getRunpodJobStatus(endpointId, setup.initJobId);
+  if (!setup.initJobStartedAt) {
+    setup = await putSetupState({ initJobStartedAt: new Date().toISOString() });
+  }
+
+  const initJobId = setup.initJobId;
+  if (!initJobId) {
+    throw new Error("Provisioning error: missing init job ID.");
+  }
+
+  const initStatus = await getRunpodJobStatus(endpointId, initJobId);
   let mapped = mapInitStatus(initStatus.status);
 
   // Defensive: if the worker returns `{status:"error"}` but RunPod reports COMPLETED,
@@ -883,7 +896,12 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
         const lastFailoverMs = setup.lastFailoverAt ? Date.parse(setup.lastFailoverAt) : 0;
         const failoverCooldownOk =
           !Number.isFinite(lastFailoverMs) || nowMs - lastFailoverMs >= AUTOPICK_QUEUE_FAILOVER_COOLDOWN_MS;
-        const failoverThresholdHit = delayTimeMs >= AUTOPICK_QUEUE_FAILOVER_AFTER_MS;
+        const initQueuedSinceMs = setup.initJobStartedAt ? Date.parse(setup.initJobStartedAt) : Number.NaN;
+        const queuedLongEnough =
+          Number.isFinite(initQueuedSinceMs) &&
+          nowMs - initQueuedSinceMs >= AUTOPICK_QUEUE_FAILOVER_AFTER_MS;
+        const failoverThresholdHit =
+          delayTimeMs >= AUTOPICK_QUEUE_FAILOVER_AFTER_MS && queuedLongEnough;
 
         if (failoverThresholdHit && failoverCooldownOk) {
           // Best-effort: stop burning queue time on a dead placement.
@@ -921,6 +939,7 @@ export async function ensureReady(env: AppEnv): Promise<ReadyResult> {
             runpodGpuType: "",
             lastFailedPlacementKey: placementKey(activeVolumeDatacenterId, selectedGpuType),
             initJobId: "",
+            initJobStartedAt: "",
             initJobStatus: "NOT_STARTED",
             lastFailoverAt: new Date().toISOString(),
             failoverCount: (setup.failoverCount ?? 0) + 1
