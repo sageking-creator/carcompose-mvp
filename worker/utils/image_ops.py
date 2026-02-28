@@ -524,7 +524,11 @@ def defringe_to_target_background(
     if not edge_band.any():
         return composite_rgb
 
-    hard_core = np.logical_and(alpha_np >= 0.98, scope)
+    hard_core_seed = np.logical_and(alpha_np >= 0.98, scope)
+    hard_core = cv2.erode(hard_core_seed.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)))
+    if hard_core.max() == 0:
+        hard_core = hard_core_seed.astype(np.uint8)
+    hard_core = hard_core.astype(bool)
     core_pixels = np.column_stack(np.where(hard_core))
     if core_pixels.size == 0:
         return composite_rgb
@@ -556,6 +560,14 @@ def defringe_to_target_background(
     high_alpha = alpha_np >= 0.90
     replace_weight[mid_alpha] *= 0.80
     replace_weight[high_alpha] *= 0.35
+
+    hard_fg = np.logical_and(alpha_np >= 0.55, scope)
+    inner_ring = np.logical_and(
+        hard_fg,
+        cv2.erode(hard_fg.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))) == 0,
+    )
+    if inner_ring.any():
+        replace_weight[inner_ring] = np.maximum(replace_weight[inner_ring], 0.55)
 
     weight3 = replace_weight[..., None]
     output = (composite_np * (1.0 - weight3)) + (target * weight3)
@@ -649,7 +661,10 @@ def _apply_contact_shadow_v2(
     if bbox_w <= 1 or bbox_h <= 1:
         return base_rgb, False, Image.new("L", base_rgb.size, 0)
 
-    region_hard = (mask_np[y1:y2, x1:x2] >= 0.5).astype(np.uint8)
+    y_search2 = min(height, y2 + max(4, int(round(bbox_h * 0.15))))
+    region_hard = (mask_np[y1:y_search2, x1:x2] >= 0.5).astype(np.uint8)
+    if region_hard.max() == 0:
+        region_hard = (mask_np[y1:y2, x1:x2] >= 0.5).astype(np.uint8)
     if region_hard.max() == 0:
         return base_rgb, False, Image.new("L", base_rgb.size, 0)
 
@@ -658,6 +673,7 @@ def _apply_contact_shadow_v2(
         return base_rgb, False, Image.new("L", base_rgb.size, 0)
 
     contour_seed = np.zeros((height, width), dtype=np.float32)
+    contact_seed = np.zeros((height, width), dtype=np.float32)
     floor_mask = np.zeros((height, width), dtype=np.float32)
     y_offset = max(1, int(round(bbox_h * 0.012)))
 
@@ -687,10 +703,74 @@ def _apply_contact_shadow_v2(
 
     # Reduce unrealistic “bumper shadow” by emphasizing wheel contact zones over the centerline.
     if bbox_w >= 64:
+        local_bottoms: list[int] = []
+        local_cols: list[int] = []
+        for col in columns:
+            rows = np.where(region_hard[:, col] > 0)[0]
+            if rows.size == 0:
+                continue
+            local_cols.append(int(col))
+            local_bottoms.append(int(rows.max()))
+
         x = np.linspace(0.0, 1.0, bbox_w, dtype=np.float32)
-        sigma = 0.16
-        w_left = np.exp(-0.5 * ((x - 0.28) / sigma) ** 2)
-        w_right = np.exp(-0.5 * ((x - 0.72) / sigma) ** 2)
+        sigma = 0.13
+        left_mu = 0.28
+        right_mu = 0.72
+        if local_cols:
+            cols_np = np.array(local_cols, dtype=np.int32)
+            bottoms_np = np.array(local_bottoms, dtype=np.float32)
+            norm_cols = cols_np.astype(np.float32) / max(1.0, float(bbox_w - 1))
+            left_mask = np.logical_and(norm_cols >= 0.12, norm_cols <= 0.46)
+            right_mask = np.logical_and(norm_cols >= 0.54, norm_cols <= 0.90)
+            if not left_mask.any() or not right_mask.any():
+                mid_col = float(np.median(cols_np))
+                left_mask = cols_np <= mid_col
+                right_mask = cols_np > mid_col
+            if left_mask.any() and right_mask.any():
+                left_cols = cols_np[left_mask]
+                right_cols = cols_np[right_mask]
+                left_bottoms = bottoms_np[left_mask]
+                right_bottoms = bottoms_np[right_mask]
+
+                def _pick_contact(cols: np.ndarray, bottoms: np.ndarray, target_mu: float) -> tuple[int, int]:
+                    if cols.size == 1:
+                        return int(cols[0]), int(bottoms[0])
+                    norm = cols.astype(np.float32) / max(1.0, float(bbox_w - 1))
+                    b_min = float(bottoms.min())
+                    b_span = float(bottoms.max() - b_min)
+                    if b_span > 1e-6:
+                        b_norm = (bottoms - b_min) / b_span
+                    else:
+                        b_norm = np.zeros_like(bottoms, dtype=np.float32)
+                    proximity = np.exp(-0.5 * ((norm - float(target_mu)) / 0.11) ** 2)
+                    score = (0.70 * b_norm) + (0.30 * proximity)
+                    idx = int(np.argmax(score))
+                    return int(cols[idx]), int(bottoms[idx])
+
+                left_contact_col, left_contact_bottom = _pick_contact(left_cols, left_bottoms, left_mu)
+                right_contact_col, right_contact_bottom = _pick_contact(right_cols, right_bottoms, right_mu)
+
+                left_mu = float(np.clip(left_contact_col / max(1, bbox_w - 1), 0.12, 0.48))
+                right_mu = float(np.clip(right_contact_col / max(1, bbox_w - 1), 0.52, 0.90))
+                sigma = 0.10
+
+                cv2.circle(
+                    contact_seed,
+                    (x1 + left_contact_col, y1 + left_contact_bottom + y_offset),
+                    radius=max(2, int(round(bbox_h * 0.012))),
+                    color=1.0,
+                    thickness=-1,
+                )
+                cv2.circle(
+                    contact_seed,
+                    (x1 + right_contact_col, y1 + right_contact_bottom + y_offset),
+                    radius=max(2, int(round(bbox_h * 0.012))),
+                    color=1.0,
+                    thickness=-1,
+                )
+
+        w_left = np.exp(-0.5 * ((x - left_mu) / sigma) ** 2)
+        w_right = np.exp(-0.5 * ((x - right_mu) / sigma) ** 2)
         weights = w_left + w_right
         weights = weights / max(float(weights.max()), 1e-6)
         contour_seed[:, x1:x2] = contour_seed[:, x1:x2] * weights[None, :]
@@ -699,13 +779,20 @@ def _apply_contact_shadow_v2(
     sigma_x = max(4.0, float(bbox_w) * 0.02)
     sigma_y = max(2.0, float(bbox_w) * 0.008)
     contour_blur = cv2.GaussianBlur(contour_seed, (0, 0), sigmaX=sigma_x, sigmaY=sigma_y)
+    contact_blur = cv2.GaussianBlur(
+        contact_seed,
+        (0, 0),
+        sigmaX=max(3.0, float(bbox_w) * 0.012),
+        sigmaY=max(1.8, float(bbox_h) * 0.010),
+    )
 
     hard_fg = (mask_np >= 0.5).astype(np.uint8)
     protect_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
     protect = cv2.dilate(hard_fg, protect_kernel, iterations=1)
     bg_only = (protect == 0).astype(np.float32)
 
-    shadow_alpha = contour_blur * floor_mask * shadow_strength * bg_only
+    shadow_alpha = np.clip((contour_blur * 0.58) + (contact_blur * 0.95), 0.0, 1.0)
+    shadow_alpha = shadow_alpha * floor_mask * shadow_strength * bg_only
     output_np = base_np * (1.0 - shadow_alpha[..., None])
     output = np.clip(output_np * 255.0, 0.0, 255.0).astype(np.uint8)
     shadow_mask = Image.fromarray(np.clip(shadow_alpha * 255.0, 0.0, 255.0).astype(np.uint8), mode="L")

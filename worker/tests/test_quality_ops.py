@@ -109,6 +109,18 @@ class QualityOpsTests(unittest.TestCase):
         self.assertLessEqual(checks["outsideLeakMeanAlpha"], 0.01)
         self.assertLessEqual(checks["nearLeakP95Alpha"], 0.05)
 
+    def test_sanitize_external_alpha_reduces_high_alpha_halo_area(self) -> None:
+        height, width = 220, 340
+        alpha = np.zeros((height, width), dtype=np.float32)
+        alpha[70:180, 90:270] = 1.0
+        alpha[64:186, 84:276] = np.maximum(alpha[64:186, 84:276], 0.82)
+        alpha[58:192, 78:282] = np.maximum(alpha[58:192, 78:282], 0.62)
+
+        before_hard_area = float((alpha >= 0.5).mean())
+        sanitized = sanitize_external_alpha(alpha)
+        after_hard_area = float((sanitized >= 0.5).mean())
+        self.assertLess(after_hard_area, before_hard_area * 0.92)
+
     def test_strict_alpha_mode_uses_solid_fallback_when_core_empty(self) -> None:
         height, width = 320, 480
         image_np = np.full((height, width, 3), 145, dtype=np.uint8)
@@ -182,6 +194,37 @@ class QualityOpsTests(unittest.TestCase):
         car_region_before = base_np[y1 + 10 : y2 - 10, x1 + 10 : x2 - 10]
         car_region_after = out_np[y1 + 10 : y2 - 10, x1 + 10 : x2 - 10]
         self.assertLess(float(np.abs(car_region_after - car_region_before).mean()), 1.0)
+
+    def test_contact_shadow_v2_emphasizes_wheel_contacts(self) -> None:
+        width, height = 320, 220
+        base = Image.fromarray(np.full((height, width, 3), 220, dtype=np.uint8), mode="RGB")
+        mask_np = np.zeros((height, width), dtype=np.uint8)
+        x1, y1, x2, y2 = 50, 60, 280, 170
+        mask_np[y1:y2, x1:x2] = 255
+        # Simulate deeper wheel contacts.
+        mask_np[y2 - 8 : y2 + 8, x1 + 40 : x1 + 72] = 255
+        mask_np[y2 - 8 : y2 + 8, x2 - 72 : x2 - 40] = 255
+        mask = Image.fromarray(mask_np, mode="L")
+
+        _, applied, shadow_mask = apply_contact_shadow(
+            image=base,
+            foreground_mask=mask,
+            foreground_bbox=(x1, y1, x2, y2),
+            strength=0.32,
+            mode="v2",
+            return_shadow_mask=True,
+        )
+        self.assertTrue(applied)
+
+        shadow_np = np.array(shadow_mask, dtype=np.float32) / 255.0
+        band_top = min(height - 1, y2 + 1)
+        band_bottom = min(height, y2 + 14)
+        left_patch = shadow_np[band_top:band_bottom, x1 + 45 : x1 + 75].mean()
+        right_patch = shadow_np[band_top:band_bottom, x2 - 75 : x2 - 45].mean()
+        center_patch = shadow_np[band_top:band_bottom, x1 + 105 : x1 + 135].mean()
+
+        self.assertGreater(float(left_patch), float(center_patch))
+        self.assertGreater(float(right_patch), float(center_patch))
 
     def test_glass_normalization_modes(self) -> None:
         width, height = 280, 220

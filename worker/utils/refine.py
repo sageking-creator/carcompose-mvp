@@ -124,7 +124,7 @@ def _decontaminate_foreground_rgb(image_rgb: np.ndarray, alpha: np.ndarray) -> n
     # light/colored outlines that survive alpha hardening.
     try:
         solid = alpha >= 0.985
-        near_edge = np.logical_and(alpha >= 0.80, alpha < 0.985)
+        near_edge = np.logical_and(alpha >= 0.65, alpha < 0.985)
         if solid.any() and near_edge.any():
             solid_u8 = solid.astype(np.uint8)
             kernel = _ellipse_kernel(2)
@@ -135,7 +135,7 @@ def _decontaminate_foreground_rgb(image_rgb: np.ndarray, alpha: np.ndarray) -> n
             interior_rgb = color_num_dil / np.maximum(color_den_dil, 1e-4)[..., None]
             interior_rgb = np.clip(interior_rgb, 0.0, 1.0)
 
-            edge_weight = np.clip((0.985 - alpha) / 0.185, 0.0, 1.0)
+            edge_weight = np.clip((0.985 - alpha) / 0.335, 0.0, 1.0)
             edge_weight = np.power(edge_weight, 1.5)
             edge_w3 = edge_weight[..., None]
             output[near_edge] = (
@@ -517,13 +517,27 @@ def sanitize_external_alpha(alpha_map: np.ndarray) -> np.ndarray:
 
     alpha = np.clip(alpha_map.astype(np.float32), 0.0, 1.0)
     long_edge = max(alpha.shape)
-    hard = (alpha >= 0.5).astype(np.uint8)
+    hard = (alpha >= 0.45).astype(np.uint8)
     hard = _largest_connected_component(hard)
     if hard.max() == 0:
         raise RuntimeError("External alpha contains no foreground component.")
 
+    core = (alpha >= 0.92).astype(np.uint8)
+    core = _largest_connected_component(core)
+    if core.max() > 0:
+        support_radius = int(np.clip(round(long_edge * 0.008), 4, 20))
+        support = cv2.dilate(core, _ellipse_kernel(support_radius))
+        constrained = np.logical_and(hard > 0, support > 0).astype(np.uint8)
+        if constrained.max() > 0:
+            hard = constrained
+        else:
+            hard = core
+
     edge_px = int(np.clip(round(long_edge * 0.0018), 1, 4))
     edge_kernel = _ellipse_kernel(edge_px)
+    hard = cv2.morphologyEx(hard, cv2.MORPH_CLOSE, _ellipse_kernel(max(1, edge_px)))
+    hard = cv2.morphologyEx(hard, cv2.MORPH_OPEN, _ellipse_kernel(max(1, edge_px // 2)))
+    hard = _largest_connected_component(hard)
     solid = cv2.erode(hard, edge_kernel)
     if solid.max() == 0:
         solid = hard
@@ -547,8 +561,8 @@ def sanitize_external_alpha(alpha_map: np.ndarray) -> np.ndarray:
     if edge_outside.any():
         edge_vals = np.clip(alpha_soft[edge_outside], 0.0, 1.0)
         edge_vals = np.minimum(edge_vals, 0.35)
-        edge_vals = 0.04 * np.power(edge_vals / 0.35, 2.0)
-        out[edge_outside] = np.clip(edge_vals, 0.0, 0.04)
+        edge_vals = 0.015 * np.power(edge_vals / 0.35, 2.4)
+        out[edge_outside] = np.clip(edge_vals, 0.0, 0.015)
 
     return np.clip(out, 0.0, 1.0)
 

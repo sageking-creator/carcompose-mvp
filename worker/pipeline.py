@@ -278,14 +278,42 @@ def place_car_on_background(
                 bottoms = np.array(per_col_bottom, dtype=np.float32)
                 # Robust ground-contact estimate: ignore tiny outlier spikes beneath the car.
                 strict_bottom_local = int(np.clip(np.percentile(bottoms, 94), 0, car_h - 1))
-                contact_cols = np.array(
-                    [col for col, row in zip(per_col_index, per_col_bottom) if row >= strict_bottom_local - 2],
-                    dtype=np.float32,
-                )
-                if contact_cols.size > 0:
-                    strict_center_local_x = int(round(float(np.median(contact_cols))))
+                wheel_bottom_local: int | None = None
+                wheel_center_local_x: int | None = None
+
+                per_col_array = np.array(per_col_index, dtype=np.int32)
+                mid_col = float(np.median(per_col_array))
+                left_mask = per_col_array <= mid_col
+                right_mask = per_col_array > mid_col
+                if left_mask.any() and right_mask.any():
+                    left_bottoms = bottoms[left_mask]
+                    right_bottoms = bottoms[right_mask]
+                    left_cols = per_col_array[left_mask]
+                    right_cols = per_col_array[right_mask]
+                    left_pick = int(np.argmax(left_bottoms))
+                    right_pick = int(np.argmax(right_bottoms))
+                    left_col = int(left_cols[left_pick])
+                    right_col = int(right_cols[right_pick])
+                    left_bottom = float(left_bottoms[left_pick])
+                    right_bottom = float(right_bottoms[right_pick])
+                    wheel_bottom_local = int(round(max(left_bottom, right_bottom)))
+                    wheel_center_local_x = int(round((left_col + right_col) / 2.0))
+
+                if wheel_bottom_local is not None:
+                    strict_bottom_local = int(
+                        np.clip(round((0.65 * wheel_bottom_local) + (0.35 * strict_bottom_local)), 0, car_h - 1)
+                    )
+                if wheel_center_local_x is not None:
+                    strict_center_local_x = wheel_center_local_x
                 else:
-                    strict_center_local_x = int(round(float(np.mean(strict_cols))))
+                    contact_cols = np.array(
+                        [col for col, row in zip(per_col_index, per_col_bottom) if row >= strict_bottom_local - 2],
+                        dtype=np.float32,
+                    )
+                    if contact_cols.size > 0:
+                        strict_center_local_x = int(round(float(np.median(contact_cols))))
+                    else:
+                        strict_center_local_x = int(round(float(np.mean(strict_cols))))
             else:
                 strict_bottom_local = int(strict_rows.max())
                 strict_center_local_x = int(round(float(np.mean(strict_cols))))
