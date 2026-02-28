@@ -52,7 +52,7 @@ test("getEnv applies worker output defaults", () => {
     assert.equal(env.STUDIO_CAR_WIDTH_RATIO, 0.82);
     assert.equal(env.STUDIO_TURNTABLE_COVERAGE, 0.88);
     assert.equal(env.STUDIO_GROUND_RATIO, 0.9);
-    assert.equal(env.STUDIO_GROUND_BIAS_PX, -6);
+    assert.equal(env.STUDIO_GROUND_BIAS_PX, -2);
     assert.equal(env.HARMONIZATION_MODE, "auto");
     assert.equal(env.ENABLE_VITMATTE, true);
     assert.equal(env.VITMATTE_MODEL_ID, "hustvl/vitmatte-small-composition-1k");

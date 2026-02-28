@@ -74,7 +74,7 @@ def get_settings() -> Settings:
         studio_car_width_ratio=float(os.getenv("STUDIO_CAR_WIDTH_RATIO", "0.82")),
         studio_turntable_coverage=float(os.getenv("STUDIO_TURNTABLE_COVERAGE", "0.88")),
         studio_ground_ratio=float(os.getenv("STUDIO_GROUND_RATIO", "0.90")),
-        studio_ground_bias_px=int(os.getenv("STUDIO_GROUND_BIAS_PX", "-6")),
+        studio_ground_bias_px=int(os.getenv("STUDIO_GROUND_BIAS_PX", "-2")),
         target_width=int(os.getenv("TARGET_WIDTH", "1920")),
         target_height=int(os.getenv("TARGET_HEIGHT", "1280")),
         harmonization_mode=os.getenv("HARMONIZATION_MODE", "auto").lower(),

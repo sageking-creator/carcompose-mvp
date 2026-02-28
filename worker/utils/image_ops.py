@@ -551,8 +551,11 @@ def defringe_to_target_background(
     replace_weight = np.clip(replace_weight, 0.0, 1.0) * edge_band.astype(np.float32)
     # Keep low-alpha boundary fully background-consistent.
     replace_weight[np.logical_and(edge_band, alpha_np <= 0.08)] = 1.0
-    # Preserve identity inside strong-alpha edge pixels.
-    replace_weight[alpha_np >= 0.70] *= 0.45
+    # Preserve identity inside strong-alpha edge pixels while still removing visible halos.
+    mid_alpha = np.logical_and(alpha_np >= 0.70, alpha_np < 0.90)
+    high_alpha = alpha_np >= 0.90
+    replace_weight[mid_alpha] *= 0.80
+    replace_weight[high_alpha] *= 0.35
 
     weight3 = replace_weight[..., None]
     output = (composite_np * (1.0 - weight3)) + (target * weight3)

@@ -385,13 +385,9 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
         alpha = sanitize_external_alpha(cutout_alpha)
         alpha_source = alpha
         car_mask = Image.fromarray(np.clip(alpha * 255.0, 0.0, 255.0).astype(np.uint8), mode="L")
-
-        cutout_rgb_np = np.array(external_cutout_rgba.convert("RGB"), dtype=np.uint8)
-        cutout_rgb_np[alpha <= 0.01] = 0
-        car_rgba_refined = Image.fromarray(
-            np.dstack((cutout_rgb_np, np.clip(alpha * 255.0, 0.0, 255.0).astype(np.uint8))),
-            mode="RGBA",
-        )
+        # Use cutout only for alpha; reconstruct foreground RGB from the original car image
+        # to avoid provider-side color halos around boundaries.
+        car_rgba_refined = refine_foreground(car_image, alpha)
     elif use_external_mask:
         external_mask_image = download_image_raw(str(car_mask_url))
         if "A" in external_mask_image.getbands():
@@ -459,12 +455,7 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
             alpha = sanitize_external_alpha(cutout_alpha)
             alpha_source = alpha
             car_mask = Image.fromarray(np.clip(alpha * 255.0, 0.0, 255.0).astype(np.uint8), mode="L")
-            cutout_rgb_np = np.array(external_cutout_rgba.convert("RGB"), dtype=np.uint8)
-            cutout_rgb_np[alpha <= 0.01] = 0
-            car_rgba_refined = Image.fromarray(
-                np.dstack((cutout_rgb_np, np.clip(alpha * 255.0, 0.0, 255.0).astype(np.uint8))),
-                mode="RGBA",
-            )
+            car_rgba_refined = refine_foreground(car_image, alpha)
         elif external_prob_map is not None:
             alpha, _ = build_hardened_alpha(car_image, external_prob_map, mode="strict")
             alpha_source = alpha

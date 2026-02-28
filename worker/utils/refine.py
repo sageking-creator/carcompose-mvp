@@ -120,6 +120,32 @@ def _decontaminate_foreground_rgb(image_rgb: np.ndarray, alpha: np.ndarray) -> n
     )
     output = np.clip(output, 0.0, 1.0)
 
+    # Pull near-opaque boundary colors toward the interior foreground color to suppress
+    # light/colored outlines that survive alpha hardening.
+    try:
+        solid = alpha >= 0.985
+        near_edge = np.logical_and(alpha >= 0.80, alpha < 0.985)
+        if solid.any() and near_edge.any():
+            solid_u8 = solid.astype(np.uint8)
+            kernel = _ellipse_kernel(2)
+            color_num = output * solid_u8[..., None].astype(np.float32)
+            color_den = solid_u8.astype(np.float32)
+            color_num_dil = cv2.dilate(color_num.astype(np.float32), kernel, iterations=1)
+            color_den_dil = cv2.dilate(color_den.astype(np.float32), kernel, iterations=1)
+            interior_rgb = color_num_dil / np.maximum(color_den_dil, 1e-4)[..., None]
+            interior_rgb = np.clip(interior_rgb, 0.0, 1.0)
+
+            edge_weight = np.clip((0.985 - alpha) / 0.185, 0.0, 1.0)
+            edge_weight = np.power(edge_weight, 1.5)
+            edge_w3 = edge_weight[..., None]
+            output[near_edge] = (
+                (1.0 - edge_w3[near_edge]) * output[near_edge]
+                + edge_w3[near_edge] * interior_rgb[near_edge]
+            )
+            output = np.clip(output, 0.0, 1.0)
+    except Exception:
+        pass
+
     # Defringe: dilate premultiplied RGB outward so semi-transparent edge pixels do not
     # carry the source background color. This is identity-preserving because it only
     # affects pixels where alpha is already low (outside the hard mask).
@@ -513,7 +539,10 @@ def sanitize_external_alpha(alpha_map: np.ndarray) -> np.ndarray:
     )
     out = np.zeros_like(alpha, dtype=np.float32)
     out[solid > 0] = 1.0
-    out[np.logical_and(edge_inside, solid == 0)] = 1.0
+    inside_band = np.logical_and(edge_inside, solid == 0)
+    if inside_band.any():
+        inside_vals = np.clip(alpha_soft[inside_band], 0.0, 1.0)
+        out[inside_band] = np.clip(np.maximum(inside_vals, 0.96), 0.96, 1.0)
 
     if edge_outside.any():
         edge_vals = np.clip(alpha_soft[edge_outside], 0.0, 1.0)

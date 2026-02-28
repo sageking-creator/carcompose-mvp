@@ -49,7 +49,7 @@ const envSchema = z.object({
   STUDIO_CAR_WIDTH_RATIO: z.coerce.number().min(0.4).max(0.95).default(0.82),
   STUDIO_TURNTABLE_COVERAGE: z.coerce.number().min(0.65).max(0.98).default(0.88),
   STUDIO_GROUND_RATIO: z.coerce.number().min(0.6).max(0.98).default(0.9),
-  STUDIO_GROUND_BIAS_PX: z.coerce.number().int().min(-64).max(64).default(-6),
+  STUDIO_GROUND_BIAS_PX: z.coerce.number().int().min(-64).max(64).default(-2),
   HARMONIZATION_MODE: z.enum(["auto", "controlcom", "lowfreq", "off"]).default("auto"),
   ENABLE_VITMATTE: z
     .string()
