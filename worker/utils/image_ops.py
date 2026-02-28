@@ -4,7 +4,7 @@ from typing import Literal, Tuple
 
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from exceptions import InvalidInputError
 
@@ -103,7 +103,11 @@ def get_tight_bbox_from_mask(mask: Image.Image, min_area_ratio: float = 0.005) -
     )
 
 
-def reharden_resized_alpha(mask_crop_resized: Image.Image, edge_px: int | None = None) -> Image.Image:
+def reharden_resized_alpha(
+    mask_crop_resized: Image.Image,
+    edge_px: int | None = None,
+    studio_mode: bool = False,
+) -> Image.Image:
     alpha = np.array(mask_crop_resized.convert("L"), dtype=np.float32) / 255.0
     hard = (alpha >= 0.5).astype(np.uint8)
     if hard.max() == 0:
@@ -111,6 +115,8 @@ def reharden_resized_alpha(mask_crop_resized: Image.Image, edge_px: int | None =
 
     long_edge = max(alpha.shape)
     band_px = int(edge_px if edge_px is not None else np.clip(round(long_edge * 0.0025), 2, 5))
+    if studio_mode:
+        band_px = min(band_px, 3)
     kernel_size = _odd_kernel_size(max(3, band_px * 2 + 1))
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
 
@@ -130,7 +136,7 @@ def reharden_resized_alpha(mask_crop_resized: Image.Image, edge_px: int | None =
         # Leak-safe AA: keep only a thin, low-alpha outside band so the car does not
         # “fog” the background. This is intentionally capped at <= 0.12 so the near-leak
         # p95 gate can pass and ControlCom can run when otherwise safe.
-        edge_cap = 0.12
+        edge_cap = 0.035 if studio_mode else 0.12
         edge_vals = np.minimum(edge_vals, 0.5)
         gamma = 2.2
         edge_vals = edge_cap * np.power(edge_vals / 0.5, gamma)
@@ -480,15 +486,63 @@ def blend_background_only(
     return Image.fromarray(np.clip(blended, 0.0, 255.0).astype(np.uint8), mode="RGB")
 
 
+def defringe_to_target_background(
+    composite_image: Image.Image,
+    background_image: Image.Image,
+    foreground_mask: Image.Image,
+    foreground_bbox: Tuple[int, int, int, int],
+    edge_alpha_max: float = 0.85,
+) -> Image.Image:
+    composite_rgb = composite_image.convert("RGB")
+    background_rgb = background_image.convert("RGB")
+    mask_l = foreground_mask.convert("L")
+
+    if background_rgb.size != composite_rgb.size:
+        background_rgb = background_rgb.resize(composite_rgb.size, Image.Resampling.LANCZOS)
+    if mask_l.size != composite_rgb.size:
+        mask_l = mask_l.resize(composite_rgb.size, Image.Resampling.LANCZOS)
+
+    composite_np = np.array(composite_rgb, dtype=np.float32)
+    background_np = np.array(background_rgb, dtype=np.float32)
+    alpha_np = np.array(mask_l, dtype=np.float32) / 255.0
+
+    height, width = alpha_np.shape
+    x1, y1, x2, y2 = _clip_bbox(foreground_bbox, width, height)
+    if x2 <= x1 or y2 <= y1:
+        return composite_rgb
+
+    pad = max(4, int(round(max(x2 - x1, y2 - y1) * 0.03)))
+    rx1 = max(0, x1 - pad)
+    ry1 = max(0, y1 - pad)
+    rx2 = min(width, x2 + pad)
+    ry2 = min(height, y2 + pad)
+
+    edge_band = np.logical_and(alpha_np > 0.02, alpha_np < max(0.05, float(edge_alpha_max)))
+    scope = np.zeros_like(edge_band, dtype=bool)
+    scope[ry1:ry2, rx1:rx2] = True
+    edge_band = np.logical_and(edge_band, scope)
+    if not edge_band.any():
+        return composite_rgb
+
+    # Pull semi-transparent boundary pixels toward the target background
+    # to suppress source-background color contamination around wheels/underbody.
+    weight = _smoothstep(0.15, max(0.2, float(edge_alpha_max)), 1.0 - alpha_np)
+    weight = np.clip(weight, 0.0, 1.0) * edge_band.astype(np.float32)
+    weight3 = weight[..., None]
+
+    output = (composite_np * (1.0 - weight3)) + (background_np * weight3)
+    return Image.fromarray(np.clip(output, 0.0, 255.0).astype(np.uint8), mode="RGB")
+
+
 def _apply_contact_shadow_v1(
     image: Image.Image,
     foreground_mask: Image.Image,
     foreground_bbox: Tuple[int, int, int, int],
     strength: float,
-) -> tuple[Image.Image, bool]:
+) -> tuple[Image.Image, bool, Image.Image]:
     shadow_strength = max(0.0, min(1.0, float(strength)))
     if shadow_strength <= 0.0:
-        return image.convert("RGB"), False
+        return image.convert("RGB"), False, Image.new("L", image.size, 0)
 
     base_rgb = image.convert("RGB")
     mask_l = foreground_mask.convert("L")
@@ -503,17 +557,17 @@ def _apply_contact_shadow_v1(
     bbox_w = max(1, x2 - x1)
     bbox_h = max(1, y2 - y1)
     if bbox_w <= 1 or bbox_h <= 1:
-        return base_rgb, False
+        return base_rgb, False, Image.new("L", base_rgb.size, 0)
 
     region_mask = mask_np[y1:y2, x1:x2]
     if region_mask.max() <= 0.0:
-        return base_rgb, False
+        return base_rgb, False, Image.new("L", base_rgb.size, 0)
 
     seed_start = int(round(bbox_h * (1.0 - 0.22)))
     seed_start = max(0, min(seed_start, bbox_h - 1))
     seed = region_mask[seed_start:, :]
     if seed.size == 0 or seed.max() <= 0.0:
-        return base_rgb, False
+        return base_rgb, False, Image.new("L", base_rgb.size, 0)
 
     squashed_h = max(3, int(round(seed.shape[0] * 0.18)))
     seed_squashed = cv2.resize(seed, (bbox_w, squashed_h), interpolation=cv2.INTER_LINEAR)
@@ -530,11 +584,16 @@ def _apply_contact_shadow_v1(
         shadow_canvas[top : top + squashed_h, x1:x2], seed_blurred
     )
 
-    fg_alpha = mask_np
-    shadow_alpha = shadow_canvas * shadow_strength * (1.0 - fg_alpha)
+    hard_fg = (mask_np >= 0.5).astype(np.uint8)
+    protect_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    protect = cv2.dilate(hard_fg, protect_kernel, iterations=1)
+    bg_only = (protect == 0).astype(np.float32)
+
+    shadow_alpha = shadow_canvas * shadow_strength * bg_only
     output_np = base_np * (1.0 - shadow_alpha[..., None])
     output = np.clip(output_np * 255.0, 0.0, 255.0).astype(np.uint8)
-    return Image.fromarray(output, mode="RGB"), True
+    shadow_mask = Image.fromarray(np.clip(shadow_alpha * 255.0, 0.0, 255.0).astype(np.uint8), mode="L")
+    return Image.fromarray(output, mode="RGB"), True, shadow_mask
 
 
 def _apply_contact_shadow_v2(
@@ -542,10 +601,10 @@ def _apply_contact_shadow_v2(
     foreground_mask: Image.Image,
     foreground_bbox: Tuple[int, int, int, int],
     strength: float,
-) -> tuple[Image.Image, bool]:
+) -> tuple[Image.Image, bool, Image.Image]:
     shadow_strength = max(0.0, min(1.0, float(strength)))
     if shadow_strength <= 0.0:
-        return image.convert("RGB"), False
+        return image.convert("RGB"), False, Image.new("L", image.size, 0)
 
     base_rgb = image.convert("RGB")
     mask_l = foreground_mask.convert("L")
@@ -560,15 +619,15 @@ def _apply_contact_shadow_v2(
     bbox_w = max(1, x2 - x1)
     bbox_h = max(1, y2 - y1)
     if bbox_w <= 1 or bbox_h <= 1:
-        return base_rgb, False
+        return base_rgb, False, Image.new("L", base_rgb.size, 0)
 
     region_hard = (mask_np[y1:y2, x1:x2] >= 0.5).astype(np.uint8)
     if region_hard.max() == 0:
-        return base_rgb, False
+        return base_rgb, False, Image.new("L", base_rgb.size, 0)
 
     columns = np.where(region_hard.sum(axis=0) > 0)[0]
     if columns.size == 0:
-        return base_rgb, False
+        return base_rgb, False, Image.new("L", base_rgb.size, 0)
 
     contour_seed = np.zeros((height, width), dtype=np.float32)
     floor_mask = np.zeros((height, width), dtype=np.float32)
@@ -588,7 +647,7 @@ def _apply_contact_shadow_v2(
             floor_mask[floor_start:, gx] = 1.0
 
     if len(points) < 3:
-        return base_rgb, False
+        return base_rgb, False, Image.new("L", base_rgb.size, 0)
 
     thickness = max(1, int(round(bbox_h * 0.01)))
     contour_points = np.array(points, dtype=np.int32).reshape(-1, 1, 2)
@@ -613,11 +672,93 @@ def _apply_contact_shadow_v2(
     sigma_y = max(2.0, float(bbox_w) * 0.008)
     contour_blur = cv2.GaussianBlur(contour_seed, (0, 0), sigmaX=sigma_x, sigmaY=sigma_y)
 
-    fg_alpha = mask_np
-    shadow_alpha = contour_blur * floor_mask * shadow_strength * (1.0 - fg_alpha)
+    hard_fg = (mask_np >= 0.5).astype(np.uint8)
+    protect_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    protect = cv2.dilate(hard_fg, protect_kernel, iterations=1)
+    bg_only = (protect == 0).astype(np.float32)
+
+    shadow_alpha = contour_blur * floor_mask * shadow_strength * bg_only
     output_np = base_np * (1.0 - shadow_alpha[..., None])
     output = np.clip(output_np * 255.0, 0.0, 255.0).astype(np.uint8)
-    return Image.fromarray(output, mode="RGB"), True
+    shadow_mask = Image.fromarray(np.clip(shadow_alpha * 255.0, 0.0, 255.0).astype(np.uint8), mode="L")
+    return Image.fromarray(output, mode="RGB"), True, shadow_mask
+
+
+def _apply_contact_shadow_v3(
+    image: Image.Image,
+    foreground_mask: Image.Image,
+    foreground_bbox: Tuple[int, int, int, int],
+    strength: float,
+) -> tuple[Image.Image, bool, Image.Image]:
+    shadow_strength = max(0.0, min(1.0, float(strength)))
+    if shadow_strength <= 0.0:
+        return image.convert("RGB"), False, Image.new("L", image.size, 0)
+
+    base_rgb = image.convert("RGB")
+    mask_l = foreground_mask.convert("L")
+    if mask_l.size != base_rgb.size:
+        mask_l = mask_l.resize(base_rgb.size, Image.Resampling.LANCZOS)
+
+    base_np = np.array(base_rgb, dtype=np.float32) / 255.0
+    alpha = np.array(mask_l, dtype=np.float32) / 255.0
+    hard = (alpha >= 0.5).astype(np.uint8)
+    if hard.max() == 0:
+        return base_rgb, False, Image.new("L", base_rgb.size, 0)
+
+    height, width = hard.shape
+    x1, y1, x2, y2 = _clip_bbox(foreground_bbox, width, height)
+    bbox_w = max(1, x2 - x1)
+    bbox_h = max(1, y2 - y1)
+
+    region = hard[y1:y2, x1:x2]
+    if region.max() == 0:
+        return base_rgb, False, Image.new("L", base_rgb.size, 0)
+
+    # 1) Near-contact AO band from distance to lower silhouette edge.
+    lower_band_h = max(6, int(round(bbox_h * 0.18)))
+    region_lower = np.zeros_like(region, dtype=np.uint8)
+    region_lower[max(0, region.shape[0] - lower_band_h) :, :] = region[max(0, region.shape[0] - lower_band_h) :, :]
+    dist = cv2.distanceTransform(1 - region_lower, cv2.DIST_L2, 3)
+    ao_local = np.exp(-(dist / max(2.0, bbox_w * 0.01)) ** 2).astype(np.float32)
+    ao_local *= (region_lower == 0).astype(np.float32)
+
+    ao_canvas = np.zeros((height, width), dtype=np.float32)
+    ao_canvas[y1:y2, x1:x2] = ao_local
+
+    # 2) Wider soft-floor shadow from projected contour.
+    contour_seed = np.zeros((height, width), dtype=np.float32)
+    cols = np.where(region.sum(axis=0) > 0)[0]
+    points = []
+    for col in cols:
+        rows = np.where(region[:, col] > 0)[0]
+        if rows.size == 0:
+            continue
+        points.append((x1 + int(col), y1 + int(rows.max())))
+    if len(points) < 3:
+        return base_rgb, False, Image.new("L", base_rgb.size, 0)
+
+    poly = np.array(points, dtype=np.int32).reshape(-1, 1, 2)
+    cv2.polylines(contour_seed, [poly], isClosed=False, color=1.0, thickness=max(1, int(round(bbox_h * 0.01))))
+    contour_seed = np.roll(contour_seed, shift=max(2, int(round(bbox_h * 0.012))), axis=0)
+    contour_seed[: max(2, int(round(bbox_h * 0.012))), :] = 0.0
+    soft = cv2.GaussianBlur(
+        contour_seed,
+        (0, 0),
+        sigmaX=max(5.0, float(bbox_w) * 0.025),
+        sigmaY=max(3.0, float(bbox_w) * 0.010),
+    )
+
+    shadow_alpha = np.clip((ao_canvas * 0.65) + (soft * 0.55), 0.0, 1.0)
+
+    # Keep shadow only on background.
+    protect = cv2.dilate(hard, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)), iterations=1)
+    shadow_alpha *= (protect == 0).astype(np.float32)
+    shadow_alpha *= shadow_strength
+
+    output_np = base_np * (1.0 - shadow_alpha[..., None])
+    output = np.clip(output_np * 255.0, 0.0, 255.0).astype(np.uint8)
+    shadow_mask = Image.fromarray(np.clip(shadow_alpha * 255.0, 0.0, 255.0).astype(np.uint8), mode="L")
+    return Image.fromarray(output, mode="RGB"), True, shadow_mask
 
 
 def apply_contact_shadow(
@@ -625,11 +766,19 @@ def apply_contact_shadow(
     foreground_mask: Image.Image,
     foreground_bbox: Tuple[int, int, int, int],
     strength: float = 0.32,
-    mode: Literal["v1", "v2"] = "v2",
-) -> tuple[Image.Image, bool]:
+    mode: Literal["v1", "v2", "v3"] = "v3",
+    return_shadow_mask: bool = False,
+) -> tuple[Image.Image, bool] | tuple[Image.Image, bool, Image.Image]:
     if mode == "v1":
-        return _apply_contact_shadow_v1(image, foreground_mask, foreground_bbox, strength)
-    return _apply_contact_shadow_v2(image, foreground_mask, foreground_bbox, strength)
+        output, applied, shadow_mask = _apply_contact_shadow_v1(image, foreground_mask, foreground_bbox, strength)
+    elif mode == "v2":
+        output, applied, shadow_mask = _apply_contact_shadow_v2(image, foreground_mask, foreground_bbox, strength)
+    else:
+        output, applied, shadow_mask = _apply_contact_shadow_v3(image, foreground_mask, foreground_bbox, strength)
+
+    if return_shadow_mask:
+        return output, applied, shadow_mask
+    return output, applied
 
 
 def is_studio_background(image: Image.Image) -> bool:
@@ -772,9 +921,8 @@ def estimate_turntable_alignment(image: Image.Image) -> dict[str, int] | None:
     major_axis = int(round(major / scale))
     minor_axis = int(round(minor / scale))
 
-    # Ground estimate: slightly below ellipse center along the minor axis.
-    ground_factor = 0.85
-    ground_y = int(round(center_y + (minor_axis / 2.0) * ground_factor))
+    # Ground estimate: ellipse bottom is a better contact proxy for turntables.
+    ground_y = int(round(center_y + (minor_axis / 2.0)))
     ground_y = max(0, min(ground_y, int(round(image.size[1])) - 1))
 
     return {
@@ -788,17 +936,64 @@ def estimate_turntable_alignment(image: Image.Image) -> dict[str, int] | None:
     }
 
 
+def render_placement_overlay(
+    background: Image.Image,
+    placement_bbox: Tuple[int, int, int, int],
+    alignment: dict[str, int] | None,
+    strict_bottom_local: int,
+) -> Image.Image:
+    overlay = background.convert("RGB").copy()
+    draw = ImageDraw.Draw(overlay)
+    x1, y1, x2, y2 = placement_bbox
+    draw.rectangle((x1, y1, x2, y2), outline=(32, 192, 255), width=3)
+
+    strict_y = y1 + max(0, strict_bottom_local)
+    draw.line((x1, strict_y, x2, strict_y), fill=(255, 64, 64), width=2)
+
+    if alignment:
+        center_x = int(alignment.get("centerX", 0))
+        ground_y = int(alignment.get("groundY", 0))
+        major_axis = int(alignment.get("majorAxis", alignment.get("spanW", 0)))
+        minor_axis = int(alignment.get("minorAxis", 0))
+
+        if major_axis > 0 and minor_axis > 0:
+            cx = int(alignment.get("centerX", center_x))
+            cy = int(alignment.get("centerY", ground_y))
+            left = cx - (major_axis // 2)
+            right = cx + (major_axis // 2)
+            top = cy - (minor_axis // 2)
+            bottom = cy + (minor_axis // 2)
+            draw.ellipse((left, top, right, bottom), outline=(220, 220, 220), width=2)
+
+        draw.line((0, ground_y, overlay.size[0], ground_y), fill=(255, 192, 0), width=2)
+        draw.line((center_x, 0, center_x, overlay.size[1]), fill=(120, 200, 255), width=1)
+
+    return overlay
+
+
 def apply_glass_normalization(
     image: Image.Image,
     foreground_mask: Image.Image,
     foreground_bbox: Tuple[int, int, int, int],
     mode: Literal["off", "auto", "force"] = "off",
-) -> tuple[Image.Image, bool]:
+    return_candidate_mask: bool = False,
+    candidate_mask_override: Image.Image | None = None,
+    return_glass_render: bool = False,
+) -> tuple[Image.Image, bool] | tuple[Image.Image, bool, Image.Image] | tuple[Image.Image, bool, Image.Image, Image.Image]:
     normalized_mode = str(mode).lower()
     if normalized_mode not in {"off", "auto", "force"}:
         normalized_mode = "off"
     if normalized_mode == "off":
-        return image.convert("RGB"), False
+        result = image.convert("RGB")
+        candidate_mask = Image.new("L", result.size, 0)
+        glass_render = Image.new("RGB", result.size, (0, 0, 0))
+        if return_candidate_mask and return_glass_render:
+            return result, False, candidate_mask, glass_render
+        if return_candidate_mask:
+            return result, False, candidate_mask
+        if return_glass_render:
+            return result, False, glass_render
+        return result, False
 
     base_rgb = image.convert("RGB")
     mask_l = foreground_mask.convert("L")
@@ -810,17 +1005,43 @@ def apply_glass_normalization(
     height, width = mask_np.shape
     x1, y1, x2, y2 = _clip_bbox(foreground_bbox, width, height)
     if x2 <= x1 or y2 <= y1:
+        if return_candidate_mask and return_glass_render:
+            return base_rgb, False, Image.new("L", base_rgb.size, 0), Image.new("RGB", base_rgb.size, (0, 0, 0))
+        if return_candidate_mask:
+            return base_rgb, False, Image.new("L", base_rgb.size, 0)
+        if return_glass_render:
+            return base_rgb, False, Image.new("RGB", base_rgb.size, (0, 0, 0))
         return base_rgb, False
 
     bbox_h = y2 - y1
     upper_limit = y1 + int(round(bbox_h * 0.55))
     upper_limit = max(y1 + 1, min(upper_limit, y2))
+    lower_cut = y1 + int(round(bbox_h * 0.45))
+    lower_cut = max(y1 + 1, min(lower_cut, y2))
 
     yy, xx = np.ogrid[:height, :width]
     geo_region = (xx >= x1) & (xx < x2) & (yy >= y1) & (yy < upper_limit)
     fg_region = mask_np > 0.25
     candidate_base = geo_region & fg_region
+    candidate_override = None
+    if candidate_mask_override is not None:
+        override = np.array(candidate_mask_override.convert("L"), dtype=np.uint8)
+        if override.shape != mask_np.shape:
+            override = np.array(
+                candidate_mask_override.convert("L").resize(base_rgb.size, Image.Resampling.NEAREST),
+                dtype=np.uint8,
+            )
+        candidate_override = override > 127
+
     if not candidate_base.any():
+        candidate_mask = Image.new("L", base_rgb.size, 0)
+        glass_render = Image.new("RGB", base_rgb.size, (0, 0, 0))
+        if return_candidate_mask and return_glass_render:
+            return base_rgb, False, candidate_mask, glass_render
+        if return_candidate_mask:
+            return base_rgb, False, candidate_mask
+        if return_glass_render:
+            return base_rgb, False, glass_render
         return base_rgb, False
 
     gray = cv2.cvtColor(rgb_u8, cv2.COLOR_RGB2GRAY).astype(np.float32)
@@ -828,19 +1049,41 @@ def apply_glass_normalization(
     sobel_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
     texture = np.sqrt((sobel_x * sobel_x) + (sobel_y * sobel_y))
 
-    if normalized_mode == "auto":
-        texture_threshold = float(np.percentile(texture[candidate_base], 35))
-        candidate = candidate_base & (texture <= texture_threshold)
-        min_pixels = max(80, int(candidate_base.sum() * 0.02))
-        if int(candidate.sum()) < min_pixels:
+    if candidate_override is not None:
+        candidate = candidate_override & candidate_base
+        candidate &= (yy < lower_cut)
+        if int(candidate.sum()) < 80:
+            candidate_mask = Image.new("L", base_rgb.size, 0)
+            glass_render = Image.new("RGB", base_rgb.size, (0, 0, 0))
+            if return_candidate_mask and return_glass_render:
+                return base_rgb, False, candidate_mask, glass_render
+            if return_candidate_mask:
+                return base_rgb, False, candidate_mask
+            if return_glass_render:
+                return base_rgb, False, glass_render
             return base_rgb, False
     else:
-        candidate = candidate_base
+        if normalized_mode == "auto":
+            texture_threshold = float(np.percentile(texture[candidate_base], 35))
+            candidate = candidate_base & (texture <= texture_threshold)
+            min_pixels = max(80, int(candidate_base.sum() * 0.02))
+            if int(candidate.sum()) < min_pixels:
+                candidate_mask = Image.new("L", base_rgb.size, 0)
+                glass_render = Image.new("RGB", base_rgb.size, (0, 0, 0))
+                if return_candidate_mask and return_glass_render:
+                    return base_rgb, False, candidate_mask, glass_render
+                if return_candidate_mask:
+                    return base_rgb, False, candidate_mask
+                if return_glass_render:
+                    return base_rgb, False, glass_render
+                return base_rgb, False
+        else:
+            candidate = candidate_base
 
     hsv = cv2.cvtColor(rgb_u8, cv2.COLOR_RGB2HSV).astype(np.float32)
     hsv_out = hsv.copy()
-    hsv_out[:, :, 1][candidate] = np.clip(hsv_out[:, :, 1][candidate] * 0.75, 0.0, 255.0)
-    hsv_out[:, :, 2][candidate] = np.clip(hsv_out[:, :, 2][candidate] * 0.92, 0.0, 255.0)
+    hsv_out[:, :, 1][candidate] = np.clip(hsv_out[:, :, 1][candidate] * 0.70, 0.0, 255.0)
+    hsv_out[:, :, 2][candidate] = np.clip(hsv_out[:, :, 2][candidate] * 0.94, 0.0, 255.0)
 
     rgb_mod_u8 = cv2.cvtColor(hsv_out.astype(np.uint8), cv2.COLOR_HSV2RGB)
     rgb_blur_u8 = cv2.bilateralFilter(rgb_mod_u8, d=9, sigmaColor=50, sigmaSpace=9)
@@ -855,14 +1098,28 @@ def apply_glass_normalization(
     output_np = (base_np * (1.0 - candidate_alpha[..., None])) + (rgb_mod * candidate_alpha[..., None])
 
     gradient_map = np.zeros((height, width), dtype=np.float32)
-    gradient_line = np.linspace(0.06, 0.0, max(1, upper_limit - y1), dtype=np.float32)
+    gradient_line = np.linspace(0.12, 0.0, max(1, upper_limit - y1), dtype=np.float32)
     gradient_map[y1:upper_limit, x1:x2] = gradient_line[:, None]
     gradient_map = gradient_map * candidate_alpha
     neutral = np.ones_like(output_np) * 0.92
     output_np = (output_np * (1.0 - gradient_map[..., None])) + (neutral * gradient_map[..., None])
 
     output_u8 = np.clip(output_np * 255.0, 0.0, 255.0).astype(np.uint8)
-    return Image.fromarray(output_u8, mode="RGB"), True
+    candidate_mask_u8 = np.zeros((height, width), dtype=np.uint8)
+    candidate_mask_u8[candidate] = 255
+    candidate_mask = Image.fromarray(candidate_mask_u8, mode="L")
+    glass_render_u8 = np.zeros_like(output_u8, dtype=np.uint8)
+    glass_render_u8[candidate] = output_u8[candidate]
+    glass_render = Image.fromarray(glass_render_u8, mode="RGB")
+
+    result = Image.fromarray(output_u8, mode="RGB")
+    if return_candidate_mask and return_glass_render:
+        return result, True, candidate_mask, glass_render
+    if return_candidate_mask:
+        return result, True, candidate_mask
+    if return_glass_render:
+        return result, True, glass_render
+    return result, True
 
 
 def compute_edge_halo_stats(
@@ -907,6 +1164,50 @@ def compute_edge_halo_stats(
     return {
         "edgeHaloMeanDelta": edge_halo_mean_delta,
         "edgeBandWidthPx": edge_band_width_px,
+    }
+
+
+def compute_composite_fringe_stats(
+    composite_image: Image.Image,
+    background_image: Image.Image,
+    foreground_mask: Image.Image,
+    foreground_bbox: Tuple[int, int, int, int],
+) -> dict[str, float]:
+    composite = np.array(composite_image.convert("RGB"), dtype=np.float32)
+    background = np.array(background_image.convert("RGB"), dtype=np.float32)
+    alpha = np.array(foreground_mask.convert("L"), dtype=np.float32) / 255.0
+
+    if composite.shape != background.shape:
+        background = np.array(
+            background_image.convert("RGB").resize(composite_image.size, Image.Resampling.LANCZOS),
+            dtype=np.float32,
+        )
+    if alpha.shape[:2] != composite.shape[:2]:
+        alpha = np.array(
+            foreground_mask.convert("L").resize(composite_image.size, Image.Resampling.LANCZOS),
+            dtype=np.float32,
+        ) / 255.0
+
+    height, width = alpha.shape
+    x1, y1, x2, y2 = _clip_bbox(foreground_bbox, width, height)
+    region_alpha = alpha[y1:y2, x1:x2]
+    if region_alpha.size == 0:
+        return {"fringeRgbMean": 0.0, "fringeRgbP95": 0.0}
+
+    hard = (region_alpha >= 0.5).astype(np.uint8)
+    if hard.max() == 0:
+        return {"fringeRgbMean": 0.0, "fringeRgbP95": 0.0}
+
+    outer = cv2.dilate(hard, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11)), iterations=1)
+    ring = np.logical_and(outer > 0, hard == 0)
+    if ring.sum() < 12:
+        return {"fringeRgbMean": 0.0, "fringeRgbP95": 0.0}
+
+    diff = np.abs(composite[y1:y2, x1:x2] - background[y1:y2, x1:x2]).mean(axis=2)
+    values = diff[ring]
+    return {
+        "fringeRgbMean": float(np.mean(values)),
+        "fringeRgbP95": float(np.percentile(values, 95)),
     }
 
 

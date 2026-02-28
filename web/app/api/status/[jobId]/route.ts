@@ -36,11 +36,16 @@ type WorkerSuccessOutput = {
     nearLeakMeanAlpha?: number;
     nearLeakP95Alpha?: number;
     maskAreaRatio?: number;
+    rawFringeRgbMean?: number;
+    rawFringeRgbP95?: number;
+    fringeRgbMean?: number;
+    fringeRgbP95?: number;
     edgeHaloMeanDelta?: number;
     edgeBandWidthPx?: number;
     protectCoverageRatio?: number;
     contactShadowApplied?: boolean;
     glassModeApplied?: "off" | "auto" | "force";
+    glassBackendApplied?: "none" | "legacy" | "sam2";
     studioModeApplied?: "off" | "auto" | "on";
   };
 };
@@ -118,8 +123,9 @@ export async function GET(
         return NextResponse.json({ status: "processing" });
       }
 
-      const [carImageUrl, backgroundImageUrl, outputPutUrl, debugPutUrls] = await Promise.all([
+      const [carImageUrl, carMaskUrl, backgroundImageUrl, outputPutUrl, debugPutUrls] = await Promise.all([
         presignGet(job.input.carKey, 3600),
+        job.input.maskKey ? presignGet(job.input.maskKey, 3600) : Promise.resolve(undefined),
         presignGet(job.input.backgroundKey, 3600),
         presignPut(job.output.outputKey, "image/jpeg", 3600),
         debugArtifactEntries(job.output.debugKeys).length > 0
@@ -139,6 +145,7 @@ export async function GET(
         buildCompositeRunpodInput({
           jobId: job.jobId,
           carImageUrl,
+          carMaskUrl,
           backgroundImageUrl,
           outputPutUrl,
           pipelineVariant: job.variant,

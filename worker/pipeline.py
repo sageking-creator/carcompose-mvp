@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
+import cv2
 from loguru import logger
 import numpy as np
 from PIL import Image
@@ -14,9 +15,12 @@ from models.bargainnet import BargainNetScorer
 from models.controlcom import ControlComHarmonizer
 from models.libcom_reflection import LibcomReflectionGenerator
 from models.libcom_shadow import LibcomShadowGenerator
+from models.sam2_glass import Sam2GlassSegmenter
+from models.vitmatte import VitMatteRefiner
 from settings import Settings
 from utils.image import (
     download_image,
+    download_image_raw,
     fit_background,
     generate_reshoot_guidance,
     upload_debug_image_put,
@@ -26,28 +30,40 @@ from utils.image import (
 from utils.image_ops import (
     apply_contact_shadow,
     apply_glass_normalization,
+    apply_low_frequency_harmonization,
     apply_multiband_harmonization,
     blend_background_only,
+    compute_composite_fringe_stats,
     compute_edge_halo_stats,
     compute_mask_artifact_checks,
     compute_detail_preservation_ratio,
+    defringe_to_target_background,
     estimate_turntable_alignment,
     get_tight_bbox_from_mask,
     is_studio_background,
     paste_mask_into_background,
+    render_placement_overlay,
     reharden_resized_alpha,
     resize_rgba_premultiplied,
 )
+from utils.refine import build_hardened_alpha, refine_foreground
 
 _models: Dict[str, Any] = {}
 _DEBUG_ARTIFACT_CONTENT_TYPES: dict[str, str] = {
     "mask_png": "image/png",
+    "trimap_png": "image/png",
+    "vitmatte_alpha_png": "image/png",
+    "edge_band_png": "image/png",
     "foreground_rgba_png": "image/png",
     "placed_mask_png": "image/png",
     "composite_raw_jpg": "image/jpeg",
     "controlcom_guidance_jpg": "image/jpeg",
     "harmonized_jpg": "image/jpeg",
     "final_jpg": "image/jpeg",
+    "shadow_mask_png": "image/png",
+    "glass_mask_png": "image/png",
+    "glass_render_jpg": "image/jpeg",
+    "placement_overlay_jpg": "image/jpeg",
 }
 
 
@@ -74,6 +90,32 @@ def _mask_checks_guidance_risky(checks: dict[str, float]) -> bool:
         or checks["nearLeakMeanAlpha"] > 0.02
         or checks["nearLeakP95Alpha"] > 0.12
     )
+
+
+def _fringe_risky(stats: dict[str, float], settings: Settings) -> bool:
+    return (
+        float(stats.get("fringeRgbMean", 0.0)) > settings.max_fringe_rgb_mean
+        or float(stats.get("fringeRgbP95", 0.0)) > settings.max_fringe_rgb_p95
+    )
+
+
+def _build_vitmatte_trimap(alpha_init: np.ndarray) -> Image.Image:
+    alpha = np.clip(alpha_init.astype(np.float32), 0.0, 1.0)
+    height, width = alpha.shape
+    long_edge = max(height, width)
+    radius = int(np.clip(round(long_edge * 0.010), 12, 28))
+    kernel_size = max(3, (radius * 2) + 1)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+
+    hard_fg = (alpha >= 0.95).astype(np.uint8)
+    hard_bg = (alpha <= 0.05).astype(np.uint8)
+    sure_fg = cv2.erode(hard_fg, kernel, iterations=1)
+    sure_bg = cv2.erode(hard_bg, kernel, iterations=1)
+
+    trimap = np.full((height, width), 128, dtype=np.uint8)
+    trimap[sure_bg > 0] = 0
+    trimap[sure_fg > 0] = 255
+    return Image.fromarray(trimap, mode="L")
 
 
 def _maybe_dump_debug_image(settings: Settings, job_id: str, name: str, image: Image.Image) -> None:
@@ -116,22 +158,39 @@ def _emit_debug_artifact(
         logger.warning(f"[{job_id}] Failed to upload debug artifact '{remote_key}': {error}")
 
 
-def get_models(settings: Settings, *, variant: str) -> Dict[str, Any]:
+def get_models(settings: Settings, *, variant: str, require_segmenter: bool = True) -> Dict[str, Any]:
     global _models
 
-    if "segmenter" not in _models:
+    if require_segmenter and "segmenter" not in _models:
         cache_dir = Path(settings.model_cache_dir)
-        logger.info("Loading BiRefNet + ControlCom (cold start)...")
+        logger.info("Loading BiRefNet segmenter (cold start)...")
         _models["segmenter"] = BiRefNetSegmenter(
             cache_dir / "birefnet",
             infer_res=settings.birefnet_infer_res,
             repo_id=settings.birefnet_repo_id,
         )
+
+    if "harmonizer" not in _models:
+        logger.info("Loading ControlCom harmonizer (cold start)...")
         _models["harmonizer"] = ControlComHarmonizer(
             repo_dir=Path(settings.controlcom_repo_dir),
             ckpt_path=Path(settings.controlcom_ckpt),
             clip_dir=Path(settings.clip_model_dir),
             timeout_s=settings.controlcom_timeout_s,
+        )
+
+    if settings.enable_vitmatte and "vitmatte" not in _models:
+        logger.info("Loading ViTMatte refiner...")
+        _models["vitmatte"] = VitMatteRefiner(
+            model_id=settings.vitmatte_model_id,
+            cache_dir=Path(settings.hf_home),
+        )
+
+    if settings.glass_mode in {"sam2_auto", "sam2_force"} and "sam2_glass" not in _models:
+        logger.info("Loading SAM2 glass segmenter...")
+        _models["sam2_glass"] = Sam2GlassSegmenter(
+            model_id=settings.sam2_model_id,
+            cache_dir=Path(settings.hf_home),
         )
 
     if variant == "full":
@@ -155,8 +214,10 @@ def place_car_on_background(
     bg_image: Image.Image,
     studio_background: bool,
     studio_car_width_ratio: float,
+    studio_turntable_coverage: float,
     studio_ground_ratio: float,
-) -> tuple[Image.Image, Tuple[int, int, int, int], Image.Image, Image.Image]:
+    studio_ground_bias_px: int,
+) -> tuple[Image.Image, Tuple[int, int, int, int], Image.Image, Image.Image, dict[str, Any]]:
     """
     Paste refined RGBA car onto background, sized to fill ~70% of background width and
     aligned to "ground" near ~85% of background height.
@@ -178,7 +239,8 @@ def place_car_on_background(
 
     alignment = estimate_turntable_alignment(bg_image) if studio_background else None
     if alignment:
-        car_w = min(int(bg_w * width_ratio), int(alignment["spanW"] * 0.98))
+        turntable_target = float(np.clip(float(studio_turntable_coverage), 0.65, 0.98))
+        car_w = min(int(bg_w * width_ratio), int(alignment["spanW"] * turntable_target))
     else:
         car_w = int(bg_w * width_ratio)
     car_h = int(car_w / max(aspect, 1e-6))
@@ -188,30 +250,48 @@ def place_car_on_background(
 
     car_crop_rgba = car_rgba_refined.crop(tight_bbox)
     resized_rgb, resized_alpha = resize_rgba_premultiplied(car_crop_rgba, (car_w, car_h))
-    placed_mask = reharden_resized_alpha(resized_alpha)
-    alpha_np = np.array(placed_mask, dtype=np.float32) / 255.0
+    placed_mask = reharden_resized_alpha(resized_alpha, studio_mode=studio_background)
+    placed_mask_u8 = np.array(placed_mask, dtype=np.uint8)
+    alpha_np = placed_mask_u8.astype(np.float32) / 255.0
     rgb_np = np.array(resized_rgb, dtype=np.uint8)
     rgb_np[alpha_np <= 0.01] = 0
     placed_foreground_rgb = Image.fromarray(rgb_np, mode="RGB")
     car_placed_rgba = Image.merge("RGBA", (*placed_foreground_rgb.split(), placed_mask))
 
+    strict_pixels = np.where(placed_mask_u8 >= 230)
+    strict_rows = strict_pixels[0]
+    if strict_rows.size > 0:
+        strict_bottom_local = int(strict_rows.max())
+        strict_center_local_x = int(round(float(np.mean(strict_pixels[1]))))
+    else:
+        fallback_rows = np.where(placed_mask_u8 >= 1)[0]
+        strict_bottom_local = int(fallback_rows.max()) if fallback_rows.size > 0 else car_h - 1
+        strict_center_local_x = car_w // 2
+
     if alignment:
-        x = int(alignment["centerX"] - (car_w / 2.0))
-        y = int(alignment["groundY"] - car_h)
+        x = int(alignment["centerX"] - strict_center_local_x)
+        y = int(alignment["groundY"] + int(studio_ground_bias_px) - strict_bottom_local - 1)
     else:
         x = (bg_w - car_w) // 2
-        y = int(bg_h * ground_ratio) - car_h
+        y = int(bg_h * ground_ratio) - strict_bottom_local - 1
     y = max(0, min(y, bg_h - car_h))
     x = max(0, min(x, bg_w - car_w))
 
     canvas = bg_image.copy().convert("RGBA")
     canvas.paste(car_placed_rgba, (x, y), car_placed_rgba)
-    return canvas.convert("RGB"), (x, y, x + car_w, y + car_h), placed_mask, placed_foreground_rgb
+    return (
+        canvas.convert("RGB"),
+        (x, y, x + car_w, y + car_h),
+        placed_mask,
+        placed_foreground_rgb,
+        {"alignment": alignment, "strictBottomLocal": strict_bottom_local},
+    )
 
 
 def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
     job_id = payload.get("job_id")
     car_url = payload.get("car_image_url")
+    car_mask_url = payload.get("car_mask_url")
     background_url = payload.get("background_image_url")
     output_put_url = payload.get("output_put_url")
 
@@ -235,7 +315,8 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
             if isinstance(key, str) and isinstance(value, str) and value.strip():
                 debug_put_urls[key] = value
 
-    models = get_models(settings, variant=variant)
+    use_external_mask = isinstance(car_mask_url, str) and car_mask_url.strip() != ""
+    models = get_models(settings, variant=variant, require_segmenter=not use_external_mask)
     timings: Dict[str, float] = {}
 
     logger.info(f"[{job_id}] Downloading inputs...")
@@ -258,9 +339,54 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
     elif settings.studio_mode == "off":
         studio_background = False
 
-    logger.info(f"[{job_id}] Step 1: BiRefNet segmentation + edge refinement...")
+    logger.info(f"[{job_id}] Step 1: foreground extraction + edge refinement...")
     t0 = _now_s()
-    car_mask, car_rgba_refined = models["segmenter"].segment(car_image, alpha_mode="auto")
+    external_prob_map: np.ndarray | None = None
+    alpha_source: np.ndarray | None = None
+    if use_external_mask:
+        external_mask_image = download_image_raw(str(car_mask_url))
+        if "A" in external_mask_image.getbands():
+            external_prob_map = np.array(external_mask_image.getchannel("A"), dtype=np.float32) / 255.0
+        else:
+            external_prob_map = np.array(external_mask_image.convert("L"), dtype=np.float32) / 255.0
+        if external_prob_map.shape != (car_image.height, car_image.width):
+            resized = Image.fromarray(np.clip(external_prob_map * 255.0, 0.0, 255.0).astype(np.uint8), mode="L")
+            resized = resized.resize(car_image.size, Image.Resampling.BILINEAR)
+            external_prob_map = np.array(resized, dtype=np.float32) / 255.0
+        alpha, _ = build_hardened_alpha(car_image, external_prob_map, mode="strict")
+        alpha_source = alpha
+        car_mask = Image.fromarray(np.clip(alpha * 255.0, 0.0, 255.0).astype(np.uint8), mode="L")
+        car_rgba_refined = refine_foreground(car_image, alpha)
+    else:
+        car_mask, car_rgba_refined = models["segmenter"].segment(car_image, alpha_mode="auto")
+        alpha_source = np.array(car_mask, dtype=np.float32) / 255.0
+
+    if settings.enable_vitmatte and studio_background and "vitmatte" in models and alpha_source is not None:
+        trimap = _build_vitmatte_trimap(alpha_source)
+        _emit_debug_artifact(
+            settings=settings,
+            job_id=job_id,
+            local_name="01a_trimap",
+            remote_key="trimap_png",
+            image=trimap,
+            debug_put_urls=debug_put_urls,
+        )
+        try:
+            alpha_refined = models["vitmatte"].refine(car_image, alpha_source)
+            alpha_source = alpha_refined
+            car_mask = Image.fromarray(np.clip(alpha_refined * 255.0, 0.0, 255.0).astype(np.uint8), mode="L")
+            car_rgba_refined = refine_foreground(car_image, alpha_refined)
+            _emit_debug_artifact(
+                settings=settings,
+                job_id=job_id,
+                local_name="01b_vitmatte_alpha",
+                remote_key="vitmatte_alpha_png",
+                image=car_mask,
+                debug_put_urls=debug_put_urls,
+            )
+        except Exception as error:
+            logger.warning(f"[{job_id}] ViTMatte refinement failed, using initial alpha: {error}")
+
     source_bbox = get_tight_bbox_from_mask(car_mask)
     source_checks = compute_mask_artifact_checks(car_mask, source_bbox)
     if _mask_checks_source_fail(source_checks):
@@ -271,7 +397,14 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
             f"near={source_checks['nearLeakMeanAlpha']:.4f}, "
             f"area={source_checks['maskAreaRatio']:.4f}); retrying strict alpha mode."
         )
-        car_mask, car_rgba_refined = models["segmenter"].segment(car_image, alpha_mode="strict")
+        if external_prob_map is not None:
+            alpha, _ = build_hardened_alpha(car_image, external_prob_map, mode="strict")
+            alpha_source = alpha
+            car_mask = Image.fromarray(np.clip(alpha * 255.0, 0.0, 255.0).astype(np.uint8), mode="L")
+            car_rgba_refined = refine_foreground(car_image, alpha)
+        else:
+            car_mask, car_rgba_refined = models["segmenter"].segment(car_image, alpha_mode="strict")
+            alpha_source = np.array(car_mask, dtype=np.float32) / 255.0
         source_bbox = get_tight_bbox_from_mask(car_mask)
         source_checks = compute_mask_artifact_checks(car_mask, source_bbox)
         if _mask_checks_source_fail(source_checks):
@@ -304,21 +437,21 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
     )
 
     tight_bbox = source_bbox
-    composite_raw, placement_bbox, placed_mask, placed_foreground_rgb = place_car_on_background(
+    (
+        composite_raw,
+        placement_bbox,
+        placed_mask,
+        placed_foreground_rgb,
+        placement_meta,
+    ) = place_car_on_background(
         car_rgba_refined=car_rgba_refined,
         tight_bbox=tight_bbox,
         bg_image=bg_proc,
         studio_background=studio_background,
         studio_car_width_ratio=settings.studio_car_width_ratio,
+        studio_turntable_coverage=settings.studio_turntable_coverage,
         studio_ground_ratio=settings.studio_ground_ratio,
-    )
-    _emit_debug_artifact(
-        settings=settings,
-        job_id=job_id,
-        local_name="03_composite_raw",
-        remote_key="composite_raw_jpg",
-        image=composite_raw,
-        debug_put_urls=debug_put_urls,
+        studio_ground_bias_px=settings.studio_ground_bias_px,
     )
     _emit_debug_artifact(
         settings=settings,
@@ -329,20 +462,74 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
         debug_put_urls=debug_put_urls,
     )
     foreground_mask = paste_mask_into_background(bg_proc.size, placement_bbox, placed_mask)
+    foreground_alpha_np = np.array(foreground_mask, dtype=np.float32) / 255.0
+    edge_band_np = np.zeros_like(foreground_alpha_np, dtype=np.uint8)
+    edge_band_np[np.logical_and(foreground_alpha_np > 0.02, foreground_alpha_np < 0.45)] = 255
+    _emit_debug_artifact(
+        settings=settings,
+        job_id=job_id,
+        local_name="04a_edge_band",
+        remote_key="edge_band_png",
+        image=Image.fromarray(edge_band_np, mode="L"),
+        debug_put_urls=debug_put_urls,
+    )
+    composite_raw = defringe_to_target_background(
+        composite_image=composite_raw,
+        background_image=bg_proc,
+        foreground_mask=foreground_mask,
+        foreground_bbox=placement_bbox,
+        edge_alpha_max=0.35 if studio_background else 0.65,
+    )
+    fringe_stats = compute_composite_fringe_stats(
+        composite_image=composite_raw,
+        background_image=bg_proc,
+        foreground_mask=foreground_mask,
+        foreground_bbox=placement_bbox,
+    )
+    _emit_debug_artifact(
+        settings=settings,
+        job_id=job_id,
+        local_name="03_composite_raw",
+        remote_key="composite_raw_jpg",
+        image=composite_raw,
+        debug_put_urls=debug_put_urls,
+    )
+    placement_overlay = render_placement_overlay(
+        background=bg_proc,
+        placement_bbox=placement_bbox,
+        alignment=placement_meta.get("alignment"),
+        strict_bottom_local=int(placement_meta.get("strictBottomLocal", 0)),
+    )
+    _emit_debug_artifact(
+        settings=settings,
+        job_id=job_id,
+        local_name="04_placement_overlay",
+        remote_key="placement_overlay_jpg",
+        image=placement_overlay,
+        debug_put_urls=debug_put_urls,
+    )
     mask_checks = compute_mask_artifact_checks(foreground_mask, placement_bbox)
-    mask_quality_bad = _mask_checks_guidance_risky(mask_checks)
+    mask_quality_bad = _mask_checks_guidance_risky(mask_checks) or _fringe_risky(fringe_stats, settings)
 
     logger.info(f"[{job_id}] Step 2: ControlCom harmonization...")
     t0 = _now_s()
+    harmonization_mode = settings.harmonization_mode
+    if harmonization_mode not in {"auto", "controlcom", "lowfreq", "off"}:
+        harmonization_mode = "auto"
     harmonization_method = "controlcom_multiband"
     harmonization_diag: Dict[str, float] = {"protectCoverageRatio": 0.0}
     controlcom_error: str | None = None
-    if mask_quality_bad:
+    if harmonization_mode == "off":
+        harmonization_method = "identity_preserve"
+        composite_harmonized = composite_raw
+    elif mask_quality_bad:
         controlcom_error = (
             f"Mask quality check failed: area={mask_checks['maskAreaRatio']:.4f}, "
             f"interior={mask_checks['interiorOpaqueRatio']:.4f}, "
             f"outsideLeak={mask_checks['outsideLeakMeanAlpha']:.4f}, "
-            f"nearLeak={mask_checks['nearLeakMeanAlpha']:.4f}"
+            f"nearLeak={mask_checks['nearLeakMeanAlpha']:.4f}, "
+            f"fringeMean={fringe_stats['fringeRgbMean']:.3f}, "
+            f"fringeP95={fringe_stats['fringeRgbP95']:.3f}"
         )
         logger.warning(
             f"[{job_id}] {controlcom_error}. "
@@ -366,12 +553,26 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
                 image=composite_guidance,
                 debug_put_urls=debug_put_urls,
             )
-            composite_harmonized, harmonization_diag = apply_multiband_harmonization(
-                original_composite=composite_raw,
-                harmonized_guidance=composite_guidance,
-                foreground_mask=foreground_mask,
-                foreground_bbox=placement_bbox,
+            use_lowfreq = harmonization_mode == "lowfreq" or (
+                harmonization_mode == "auto" and studio_background
             )
+            if use_lowfreq:
+                harmonization_method = "controlcom_lowfreq"
+                composite_harmonized = apply_low_frequency_harmonization(
+                    original_composite=composite_raw,
+                    harmonized_guidance=composite_guidance,
+                    foreground_mask=foreground_mask,
+                    foreground_bbox=placement_bbox,
+                )
+                harmonization_diag = {"protectCoverageRatio": 0.0}
+            else:
+                harmonization_method = "controlcom_multiband"
+                composite_harmonized, harmonization_diag = apply_multiband_harmonization(
+                    original_composite=composite_raw,
+                    harmonized_guidance=composite_guidance,
+                    foreground_mask=foreground_mask,
+                    foreground_bbox=placement_bbox,
+                )
         except Exception as error:
             controlcom_error = str(error)
             logger.warning(
@@ -387,7 +588,7 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
         foreground_mask=foreground_mask,
         foreground_bbox=placement_bbox,
     )
-    if harmonization_method == "controlcom_multiband" and detail_ratio < 0.90:
+    if harmonization_method.startswith("controlcom") and detail_ratio < 0.90:
         logger.warning(
             f"[{job_id}] Detail preservation ratio dropped to {detail_ratio:.4f}. "
             "Switching to identity-preserving fallback."
@@ -408,7 +609,7 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
         foreground_bbox=placement_bbox,
     )
     if (
-        harmonization_method == "controlcom_multiband"
+        harmonization_method.startswith("controlcom")
         and (
             edge_halo_after_harmonization["edgeHaloMeanDelta"] > settings.max_edge_halo_mean_delta
             or edge_halo_after_harmonization["edgeBandWidthPx"] > settings.max_edge_band_width_px
@@ -444,21 +645,35 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
     harmony_score: float | None = None
     quality: str | None = None
     contact_shadow_applied = False
+    contact_shadow_mask = Image.new("L", final.size, 0)
     glass_mode_applied = "off"
+    glass_backend_applied = "none"
+    glass_candidate_mask = Image.new("L", final.size, 0)
+    glass_render = Image.new("RGB", final.size, (0, 0, 0))
     studio_mode_applied = "off"
 
     if variant == "core":
         try:
-            final, contact_shadow_applied = apply_contact_shadow(
+            final, contact_shadow_applied, contact_shadow_mask = apply_contact_shadow(
                 image=final,
                 foreground_mask=foreground_mask,
                 foreground_bbox=placement_bbox,
                 strength=settings.core_contact_shadow_strength,
                 mode=settings.contact_shadow_mode,
+                return_shadow_mask=True,
             )
         except Exception as error:
             logger.warning(f"[{job_id}] Contact shadow generation failed: {error}")
             contact_shadow_applied = False
+            contact_shadow_mask = Image.new("L", final.size, 0)
+        _emit_debug_artifact(
+            settings=settings,
+            job_id=job_id,
+            local_name="07_shadow_mask",
+            remote_key="shadow_mask_png",
+            image=contact_shadow_mask,
+            debug_put_urls=debug_put_urls,
+        )
 
     if variant == "full":
         logger.info(f"[{job_id}] Step 3: GPSDiffusion shadow (libcom)...")
@@ -483,15 +698,63 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
         if effective_glass_mode == "off":
             effective_glass_mode = "auto"
 
+    glass_override_mask: Image.Image | None = None
+    if settings.glass_mode in {"sam2_auto", "sam2_force"} and "sam2_glass" in models:
+        try:
+            candidate = models["sam2_glass"].segment(
+                image=final,
+                foreground_mask=foreground_mask,
+                foreground_bbox=placement_bbox,
+            )
+            if np.array(candidate, dtype=np.uint8).sum() > 0:
+                glass_override_mask = candidate
+                glass_backend_applied = "sam2"
+            elif settings.glass_mode == "sam2_force":
+                logger.warning(
+                    f"[{job_id}] SAM2 glass mode forced but no candidate mask produced; using legacy mode."
+                )
+                glass_backend_applied = "legacy"
+            else:
+                glass_backend_applied = "legacy"
+        except Exception as error:
+            logger.warning(f"[{job_id}] SAM2 glass segmentation failed: {error}")
+            glass_backend_applied = "legacy"
+    else:
+        glass_backend_applied = "legacy" if effective_glass_mode in {"auto", "force"} else "none"
+
     if effective_glass_mode in {"auto", "force"}:
-        final, glass_applied = apply_glass_normalization(
+        (
+            final,
+            glass_applied,
+            glass_candidate_mask,
+            glass_render,
+        ) = apply_glass_normalization(
             image=final,
             foreground_mask=foreground_mask,
             foreground_bbox=placement_bbox,
             mode=effective_glass_mode,
+            return_candidate_mask=True,
+            candidate_mask_override=glass_override_mask,
+            return_glass_render=True,
         )
         if glass_applied:
             glass_mode_applied = effective_glass_mode
+    _emit_debug_artifact(
+        settings=settings,
+        job_id=job_id,
+        local_name="08_glass_mask",
+        remote_key="glass_mask_png",
+        image=glass_candidate_mask,
+        debug_put_urls=debug_put_urls,
+    )
+    _emit_debug_artifact(
+        settings=settings,
+        job_id=job_id,
+        local_name="08b_glass_render",
+        remote_key="glass_render_jpg",
+        image=glass_render,
+        debug_put_urls=debug_put_urls,
+    )
 
     if variant == "full":
         logger.info(f"[{job_id}] Step 5: BargainNet QC (HarmonyScoreModel)...")
@@ -523,12 +786,18 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
         "hfRatio": round(float(detail_ratio), 4),
         "method": harmonization_method,
     }
-    if controlcom_error and harmonization_method != "controlcom_multiband":
+    if controlcom_error and not harmonization_method.startswith("controlcom"):
         detail_preservation["fallbackReason"] = controlcom_error[:320]
 
     edge_halo_stats = compute_edge_halo_stats(
         baseline_image=composite_raw,
         candidate_image=final,
+        foreground_mask=foreground_mask,
+        foreground_bbox=placement_bbox,
+    )
+    final_fringe_stats = compute_composite_fringe_stats(
+        composite_image=final,
+        background_image=bg_proc,
         foreground_mask=foreground_mask,
         foreground_bbox=placement_bbox,
     )
@@ -539,11 +808,16 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
         "nearLeakMeanAlpha": round(float(mask_checks["nearLeakMeanAlpha"]), 6),
         "nearLeakP95Alpha": round(float(mask_checks["nearLeakP95Alpha"]), 6),
         "maskAreaRatio": round(float(mask_checks["maskAreaRatio"]), 4),
+        "rawFringeRgbMean": round(float(fringe_stats["fringeRgbMean"]), 4),
+        "rawFringeRgbP95": round(float(fringe_stats["fringeRgbP95"]), 4),
+        "fringeRgbMean": round(float(final_fringe_stats["fringeRgbMean"]), 4),
+        "fringeRgbP95": round(float(final_fringe_stats["fringeRgbP95"]), 4),
         "edgeHaloMeanDelta": round(float(edge_halo_stats["edgeHaloMeanDelta"]), 4),
         "edgeBandWidthPx": round(float(edge_halo_stats["edgeBandWidthPx"]), 4),
         "protectCoverageRatio": round(float(harmonization_diag.get("protectCoverageRatio", 0.0)), 4),
         "contactShadowApplied": contact_shadow_applied,
         "glassModeApplied": glass_mode_applied,
+        "glassBackendApplied": glass_backend_applied,
         "studioModeApplied": studio_mode_applied,
     }
     _emit_debug_artifact(

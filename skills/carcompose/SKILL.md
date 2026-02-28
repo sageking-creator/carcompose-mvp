@@ -94,7 +94,33 @@ description: Workflow + invariants for CarCompose (Vercel orchestrator + R2 stat
   - Run: `/Users/Hikmet.Erdil/Documents/autobot/scripts/run-test-job.sh` (supports `--cleanup`).
 - Preserve remote debug upload contract (`debug_put_urls`) so worker failures are diagnosable without attaching to pods.
 - Cost control: R2 lifecycle rules delete `debug/` after 1 day, but during rapid iteration prune per-job objects:
-  - `cd /Users/Hikmet.Erdil/Documents/autobot/web && npx tsx scripts/r2-prune-job.ts --job-id <uuid> --delete debug,uploads,jobs --yes`
+  - `cd /Users/Hikmet.Erdil/Documents/autobot/web && npx tsx scripts/r2-prune-job.ts --job-id <uuid> --delete debug,uploads,masks,jobs --yes`
+
+## Studio quality loop
+
+- Single-run smoke:
+  - `/Users/Hikmet.Erdil/Documents/autobot/scripts/run-test-job.sh --base-url <url> --passcode <passcode> --wait`
+- Iterative loop with scoring + automatic prune:
+  - `/Users/Hikmet.Erdil/Documents/autobot/scripts/studio-loop.sh --base-url <url> --passcode <passcode> --iters 8`
+- Local scoring on a downloaded job:
+  - `/Users/Hikmet.Erdil/Documents/autobot/scripts/score-studio-job.py --job-dir /Users/Hikmet.Erdil/Documents/autobot/tmp/debug-jobs/<jobId> --background /Users/Hikmet.Erdil/Documents/autobot/test-images/background.png`
+- Cost-safe default for repeated debug:
+  - Use `scripts/studio-loop.sh` (it prunes non-best jobs via `/api/admin/prune-job`).
+  - For one-off tests, run `scripts/run-test-job.sh ... --cleanup` (or `--cleanup-all`).
+  - Keep canonical inputs in `/Users/Hikmet.Erdil/Documents/autobot/test-images/` and avoid ad-hoc upload keys.
+
+## Mask backend policy
+
+- `MASK_BACKEND=auto` (default): use fal mask extraction when `FAL_KEY` exists; otherwise fallback to local worker segmentation.
+- `MASK_BACKEND=fal`: web calls `fal-ai/birefnet/v2`, stores `masks/<jobId>/fal_mask.png` in R2, and passes `car_mask_url` to worker.
+- `MASK_BACKEND=local`: force local worker segmentation.
+- `FAL_KEY` is web-only secret; never pass it to RunPod workers.
+
+## Cleanup API
+
+- Passcode-protected prune endpoint:
+  - `POST /api/admin/prune-job`
+  - Body: `{"jobId":"<uuid>","targets":["debug","uploads","masks","outputs","jobs"]}`
 
 ## When editing the pipeline
 

@@ -49,23 +49,62 @@ def _smoothstep(edge0: float, edge1: float, value: np.ndarray) -> np.ndarray:
     return scaled * scaled * (3.0 - (2.0 * scaled))
 
 
+def _estimate_background_nearest(image_rgb: np.ndarray, outside: np.ndarray) -> np.ndarray:
+    outside_bool = outside.astype(bool)
+    if int(outside_bool.sum()) < 16:
+        return image_rgb
+
+    distance_input = np.where(outside_bool, 0, 255).astype(np.uint8)
+    _, labels = cv2.distanceTransformWithLabels(
+        distance_input,
+        cv2.DIST_L2,
+        5,
+        labelType=cv2.DIST_LABEL_PIXEL,
+    )
+
+    outside_coords = np.column_stack(np.where(outside_bool))
+    if outside_coords.size == 0:
+        return image_rgb
+
+    label_indices = labels.astype(np.int32) - 1
+    label_indices = np.clip(label_indices, 0, len(outside_coords) - 1)
+    nearest_coords = outside_coords[label_indices]
+    by = nearest_coords[:, :, 0]
+    bx = nearest_coords[:, :, 1]
+    background = image_rgb[by, bx]
+    return np.clip(background.astype(np.float32), 0.0, 1.0)
+
+
+def _restore_significant_holes(mask_bin: np.ndarray, reference_mask: np.ndarray) -> np.ndarray:
+    # Preserve wheel/spoke vents that are present in the raw thresholded mask but can be
+    # accidentally filled by close/open operations.
+    interior = cv2.erode(mask_bin.astype(np.uint8), _ellipse_kernel(2), iterations=1)
+    hole_candidates = np.logical_and(mask_bin > 0, reference_mask == 0)
+    hole_candidates = np.logical_and(hole_candidates, interior > 0).astype(np.uint8)
+    if hole_candidates.max() == 0:
+        return mask_bin
+
+    min_hole_area = max(12, int(round(float(mask_bin.sum()) * 0.00025)))
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(hole_candidates, connectivity=8)
+    recovered = np.zeros_like(mask_bin, dtype=np.uint8)
+    for label in range(1, component_count):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area >= min_hole_area:
+            recovered[labels == label] = 1
+
+    if recovered.max() == 0:
+        return mask_bin
+    return np.logical_and(mask_bin > 0, recovered == 0).astype(np.uint8)
+
+
 def _decontaminate_foreground_rgb(image_rgb: np.ndarray, alpha: np.ndarray) -> np.ndarray:
     image_rgb = np.clip(image_rgb.astype(np.float32), 0.0, 1.0)
     alpha = np.clip(alpha.astype(np.float32), 0.0, 1.0)
-    outside = (alpha <= 0.02).astype(np.float32)
-    if outside.sum() < 10:
+    outside = alpha <= 0.02
+    if int(outside.sum()) < 16:
         return image_rgb
 
-    sigma = 10
-    den = cv2.GaussianBlur(outside, (0, 0), sigmaX=sigma, sigmaY=sigma)
-    den = np.maximum(den, 1e-3)
-
-    background_estimate = np.zeros_like(image_rgb)
-    for channel in range(3):
-        weighted = image_rgb[:, :, channel] * outside
-        num = cv2.GaussianBlur(weighted, (0, 0), sigmaX=sigma, sigmaY=sigma)
-        background_estimate[:, :, channel] = num / den
-
+    background_estimate = _estimate_background_nearest(image_rgb, outside)
     edge = np.logical_and(alpha > 0.02, alpha < 0.98)
     if not np.any(edge):
         return image_rgb
@@ -74,7 +113,7 @@ def _decontaminate_foreground_rgb(image_rgb: np.ndarray, alpha: np.ndarray) -> n
     foreground_estimate = (image_rgb - ((1.0 - alpha)[..., None] * background_estimate)) / alpha_safe
     foreground_estimate = np.clip(foreground_estimate, 0.0, 1.0)
 
-    blend_weight = _smoothstep(0.2, 0.9, alpha)[..., None]
+    blend_weight = _smoothstep(0.08, 0.95, alpha)[..., None]
     output = image_rgb.copy()
     output[edge] = ((1.0 - blend_weight[edge]) * image_rgb[edge]) + (
         blend_weight[edge] * foreground_estimate[edge]
@@ -99,7 +138,7 @@ def _decontaminate_foreground_rgb(image_rgb: np.ndarray, alpha: np.ndarray) -> n
         rgb_dil = np.clip(rgb_dil, 0.0, 1.0)
 
         # Only replace outside the hard edge, where bleeding is visible.
-        fringe = np.logical_and(alpha_f > 0.001, alpha_f < 0.50)
+        fringe = np.logical_and(alpha_f > 0.001, alpha_f < 0.35)
         if fringe.any():
             output[fringe] = rgb_dil[fringe]
     except Exception:
@@ -153,7 +192,8 @@ def _build_candidate_alpha(
     guided_eps: float,
     candidate: AlphaCandidateConfig,
 ) -> tuple[np.ndarray, np.ndarray]:
-    mask_bin = (prob >= float(candidate.threshold)).astype(np.uint8)
+    mask_reference = (prob >= float(candidate.threshold)).astype(np.uint8)
+    mask_bin = mask_reference.copy()
     mask_bin = _largest_connected_component(mask_bin)
     if mask_bin.max() == 0:
         raise RuntimeError("No foreground component found.")
@@ -177,6 +217,8 @@ def _build_candidate_alpha(
     mask_bin = cv2.morphologyEx(mask_bin, cv2.MORPH_CLOSE, kernel_close)
     mask_bin = cv2.morphologyEx(mask_bin, cv2.MORPH_OPEN, kernel_open)
     mask_bin = _largest_connected_component(mask_bin)
+    mask_reference = _largest_connected_component(mask_reference)
+    mask_bin = _restore_significant_holes(mask_bin, mask_reference)
     if mask_bin.max() == 0:
         raise RuntimeError("Foreground vanished after morphology.")
 
@@ -251,8 +293,7 @@ def _tighten_alpha_from_core(
     if edge_outside.any():
         edge_vals = np.clip(alpha_soft[edge_outside], 0.0, 1.0)
         # Keep a narrow, low-alpha outside band to reduce halo visibility while preserving AA.
-        # This cap is intentionally <= 0.12 so near-leak p95 stays below the guidance gate.
-        edge_cap = 0.12
+        edge_cap = 0.08
         edge_vals = np.minimum(edge_vals, 0.5)
         gamma = 2.2
         edge_vals = edge_cap * np.power(edge_vals / 0.5, gamma)

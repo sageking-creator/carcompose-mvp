@@ -1,9 +1,11 @@
 import {
+  DeleteObjectsCommand,
   GetObjectCommand,
   HeadObjectCommand,
+  ListObjectsV2Command,
   PutBucketCorsCommand,
-  PutObjectCommand,
   PutBucketLifecycleConfigurationCommand,
+  PutObjectCommand,
   S3Client
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
@@ -65,6 +67,17 @@ export async function putJson(key: string, value: unknown): Promise<void> {
       Key: key,
       Body: JSON.stringify(value),
       ContentType: "application/json"
+    })
+  );
+}
+
+export async function putBytes(key: string, bytes: Uint8Array, contentType: string): Promise<void> {
+  await getClient().send(
+    new PutObjectCommand({
+      Bucket: getBucketName(),
+      Key: key,
+      Body: bytes,
+      ContentType: contentType
     })
   );
 }
@@ -161,6 +174,12 @@ export async function ensureLifecycleRules(bucketName: string): Promise<void> {
             Status: "Enabled",
             Filter: { Prefix: "debug/" },
             Expiration: { Days: 1 }
+          },
+          {
+            ID: "delete-masks-1d",
+            Status: "Enabled",
+            Filter: { Prefix: "masks/" },
+            Expiration: { Days: 1 }
           }
         ]
       }
@@ -185,4 +204,65 @@ export async function ensureCorsRules(bucketName: string): Promise<void> {
       }
     })
   );
+}
+
+export async function listKeysByPrefix(prefix: string): Promise<string[]> {
+  const keys: string[] = [];
+  let continuationToken: string | undefined;
+
+  for (;;) {
+    const response = await getClient().send(
+      new ListObjectsV2Command({
+        Bucket: getBucketName(),
+        Prefix: prefix,
+        ContinuationToken: continuationToken
+      })
+    );
+
+    for (const object of response.Contents ?? []) {
+      if (object.Key) {
+        keys.push(object.Key);
+      }
+    }
+
+    if (!response.IsTruncated || !response.NextContinuationToken) {
+      break;
+    }
+
+    continuationToken = response.NextContinuationToken;
+  }
+
+  return keys;
+}
+
+function chunk<T>(values: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size));
+  }
+  return chunks;
+}
+
+export async function deleteKeys(keys: string[]): Promise<number> {
+  if (keys.length === 0) {
+    return 0;
+  }
+
+  let deleted = 0;
+  for (const batch of chunk(keys, 1000)) {
+    const response = await getClient().send(
+      new DeleteObjectsCommand({
+        Bucket: getBucketName(),
+        Delete: {
+          Objects: batch.map((key) => ({ Key: key })),
+          Quiet: true
+        }
+      })
+    );
+
+    const failed = response.Errors?.length ?? 0;
+    deleted += batch.length - failed;
+  }
+
+  return deleted;
 }

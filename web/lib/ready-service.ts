@@ -120,11 +120,20 @@ function getTemplateEnv(env: AppEnv): Array<{ key: string; value: string }> {
     { key: "CORE_CONTACT_SHADOW_STRENGTH", value: String(env.CORE_CONTACT_SHADOW_STRENGTH) },
     { key: "CONTACT_SHADOW_MODE", value: env.CONTACT_SHADOW_MODE },
     { key: "GLASS_NORMALIZATION_MODE", value: env.GLASS_NORMALIZATION_MODE },
+    { key: "GLASS_MODE", value: env.GLASS_MODE },
     { key: "STUDIO_MODE", value: env.STUDIO_MODE },
     { key: "STUDIO_CAR_WIDTH_RATIO", value: String(env.STUDIO_CAR_WIDTH_RATIO) },
+    { key: "STUDIO_TURNTABLE_COVERAGE", value: String(env.STUDIO_TURNTABLE_COVERAGE) },
     { key: "STUDIO_GROUND_RATIO", value: String(env.STUDIO_GROUND_RATIO) },
+    { key: "STUDIO_GROUND_BIAS_PX", value: String(env.STUDIO_GROUND_BIAS_PX) },
+    { key: "HARMONIZATION_MODE", value: env.HARMONIZATION_MODE },
+    { key: "ENABLE_VITMATTE", value: env.ENABLE_VITMATTE ? "1" : "0" },
+    { key: "VITMATTE_MODEL_ID", value: env.VITMATTE_MODEL_ID },
+    { key: "SAM2_MODEL_ID", value: env.SAM2_MODEL_ID },
     { key: "MAX_EDGE_HALO_MEAN_DELTA", value: String(env.MAX_EDGE_HALO_MEAN_DELTA) },
     { key: "MAX_EDGE_BAND_WIDTH_PX", value: String(env.MAX_EDGE_BAND_WIDTH_PX) },
+    { key: "MAX_FRINGE_RGB_MEAN", value: String(env.MAX_FRINGE_RGB_MEAN) },
+    { key: "MAX_FRINGE_RGB_P95", value: String(env.MAX_FRINGE_RGB_P95) },
     { key: "DEBUG_ARTIFACTS", value: env.DEBUG_ARTIFACTS ? "1" : "0" }
   ];
 }

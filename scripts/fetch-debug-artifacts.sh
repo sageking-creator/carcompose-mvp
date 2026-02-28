@@ -95,9 +95,11 @@ STATUS_URL="${BASE_URL}/api/status/${JOB_ID}"
 STATUS_FILE="${OUT_DIR}/status.json"
 
 fetch_status() {
+  local tmp_file="${STATUS_FILE}.tmp"
   curl --fail --silent --show-error \
     -H "x-carcompose-passcode: ${PASSCODE}" \
-    "${STATUS_URL}" >"${STATUS_FILE}"
+    "${STATUS_URL}" >"${tmp_file}"
+  mv "${tmp_file}" "${STATUS_FILE}"
 }
 
 echo "==> Fetching status for job ${JOB_ID}"
@@ -143,7 +145,10 @@ if [[ "$DEBUG_COUNT" -gt 0 ]]; then
     if [[ "$artifact_name" == *"_png" ]]; then
       extension="png"
     fi
-    curl --fail --silent --show-error "$artifact_url" -o "${OUT_DIR}/${artifact_name}.${extension}"
+    if ! curl --fail --silent --show-error "$artifact_url" -o "${OUT_DIR}/${artifact_name}.${extension}"; then
+      echo "WARN: failed to download debug artifact '${artifact_name}' (may be missing for this worker build)" >&2
+      continue
+    fi
   done < <(jq -r '.debugUrls | to_entries[] | [.key, .value] | @tsv' "${STATUS_FILE}")
 fi
 

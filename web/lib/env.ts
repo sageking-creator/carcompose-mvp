@@ -35,24 +35,45 @@ const envSchema = z.object({
   PIPELINE_VARIANT: z.enum(["core", "full"]).default("core"),
   MODEL_CACHE_DIR: z.string().default("/runpod-volume/models"),
   HF_HOME: z.string().default("/runpod-volume/hf_cache"),
-  BIREFNET_REPO_ID: z.string().default("ZhengPeng7/BiRefNet_dynamic-matting"),
+  BIREFNET_REPO_ID: z.string().default("ZhengPeng7/BiRefNet_HR-matting"),
   BIREFNET_INFER_RES: z.coerce.number().int().refine((value) => value === 1024 || value === 2048, {
     message: "BIREFNET_INFER_RES must be 1024 or 2048"
   }).default(2048),
   MAX_OUTPUT_LONG_EDGE: z.coerce.number().int().positive().default(2048),
   OUTPUT_RESIZE_MODE: z.enum(["preserve", "stretch"]).default("preserve"),
   CORE_CONTACT_SHADOW_STRENGTH: z.coerce.number().min(0).max(1).default(0.32),
-  CONTACT_SHADOW_MODE: z.enum(["v1", "v2"]).default("v2"),
+  CONTACT_SHADOW_MODE: z.enum(["v1", "v2", "v3"]).default("v3"),
   GLASS_NORMALIZATION_MODE: z.enum(["off", "auto", "force"]).default("off"),
+  GLASS_MODE: z.enum(["legacy", "sam2_auto", "sam2_force"]).default("sam2_auto"),
   STUDIO_MODE: z.enum(["off", "auto", "on"]).default("auto"),
   STUDIO_CAR_WIDTH_RATIO: z.coerce.number().min(0.4).max(0.95).default(0.82),
+  STUDIO_TURNTABLE_COVERAGE: z.coerce.number().min(0.65).max(0.98).default(0.88),
   STUDIO_GROUND_RATIO: z.coerce.number().min(0.6).max(0.98).default(0.9),
+  STUDIO_GROUND_BIAS_PX: z.coerce.number().int().min(-64).max(64).default(-6),
+  HARMONIZATION_MODE: z.enum(["auto", "controlcom", "lowfreq", "off"]).default("auto"),
+  ENABLE_VITMATTE: z
+    .string()
+    .default("true")
+    .transform((value) => ["1", "true", "yes", "on"].includes(value.toLowerCase())),
+  VITMATTE_MODEL_ID: z.string().default("hustvl/vitmatte-small-composition-1k"),
+  SAM2_MODEL_ID: z.string().default("facebook/sam2.1-hiera-small"),
   MAX_EDGE_HALO_MEAN_DELTA: z.coerce.number().positive().default(14),
   MAX_EDGE_BAND_WIDTH_PX: z.coerce.number().positive().default(7.5),
+  MAX_FRINGE_RGB_MEAN: z.coerce.number().positive().default(2),
+  MAX_FRINGE_RGB_P95: z.coerce.number().positive().default(8),
   DEBUG_ARTIFACTS: z
     .string()
     .default("false")
     .transform((value) => ["1", "true", "yes", "on"].includes(value.toLowerCase())),
+  MASK_BACKEND: z.enum(["auto", "local", "fal"]).default("auto"),
+  FAL_KEY: z.string().optional(),
+  FAL_BIREFNET_MODEL: z.string().default("General Use (Heavy)"),
+  FAL_BIREFNET_OPERATING_RESOLUTION: z.string().default("2048x2048"),
+  FAL_BIREFNET_REFINE_FOREGROUND: z
+    .string()
+    .default("true")
+    .transform((value) => ["1", "true", "yes", "on"].includes(value.toLowerCase())),
+  FAL_TIMEOUT_S: z.coerce.number().int().positive().default(120),
   WORKER_IMAGE: z.string().optional(),
   GHCR_USERNAME: z.string().optional(),
   GHCR_TOKEN: z.string().optional(),

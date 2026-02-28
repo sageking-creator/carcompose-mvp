@@ -13,6 +13,14 @@ def download_image(url: str) -> Image.Image:
     return Image.open(BytesIO(response.content)).convert("RGB")
 
 
+def download_image_raw(url: str) -> Image.Image:
+    response = requests.get(url, timeout=60)
+    response.raise_for_status()
+    image = Image.open(BytesIO(response.content))
+    image.load()
+    return image
+
+
 
 def upload_image_put(url: str, image: Image.Image, quality: int = 97) -> None:
     output = BytesIO()

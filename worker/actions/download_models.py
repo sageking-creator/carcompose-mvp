@@ -146,6 +146,7 @@ def run_download_models(settings: Settings) -> Dict[str, object]:
     import diffusers  # noqa: F401
     import cv2
     import torchvision  # noqa: F401
+    import tokenizers  # noqa: F401
     from omegaconf import OmegaConf  # noqa: F401
     import einops  # noqa: F401
     import pytorch_lightning  # noqa: F401
@@ -173,6 +174,20 @@ def run_download_models(settings: Settings) -> Dict[str, object]:
             f"ControlCom inference script not found: {controlcom_script}. "
             "Worker image is missing vendor/controlcom."
         )
+
+    if settings.enable_vitmatte:
+        from transformers import VitMatteForImageMatting, VitMatteImageProcessor
+
+        VitMatteImageProcessor.from_pretrained(settings.vitmatte_model_id, cache_dir=str(hf_cache))
+        VitMatteForImageMatting.from_pretrained(settings.vitmatte_model_id, cache_dir=str(hf_cache))
+        downloaded.append("vitmatte")
+
+    if settings.glass_mode in {"sam2_auto", "sam2_force"}:
+        from transformers import AutoModel, AutoProcessor
+
+        AutoProcessor.from_pretrained(settings.sam2_model_id, cache_dir=str(hf_cache))
+        AutoModel.from_pretrained(settings.sam2_model_id, cache_dir=str(hf_cache))
+        downloaded.append("sam2")
 
     if variant == "full":
         from libcom import HarmonyScoreModel, ReflectionGenerationModel, ShadowGenerationModel

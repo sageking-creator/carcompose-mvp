@@ -1,11 +1,11 @@
 import { DeleteObjectsCommand, ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3";
 
-type DeleteTarget = "debug" | "uploads" | "outputs" | "jobs";
+type DeleteTarget = "debug" | "uploads" | "masks" | "outputs" | "jobs";
 
 function usage(): void {
   // eslint-disable-next-line no-console
   console.log(`Usage:
-  npx tsx scripts/r2-prune-job.ts --job-id <uuid> [--delete debug,uploads,outputs,jobs|--all] [--yes]
+  npx tsx scripts/r2-prune-job.ts --job-id <uuid> [--delete debug,uploads,masks,outputs,jobs|--all] [--yes]
 
 Description:
   Deletes R2 objects for a specific jobId (useful to control storage costs during debugging).
@@ -75,7 +75,13 @@ async function main(): Promise<void> {
       for (const part of raw.split(",")) {
         const normalized = part.trim().toLowerCase();
         if (!normalized) continue;
-        if (normalized === "debug" || normalized === "uploads" || normalized === "outputs" || normalized === "jobs") {
+        if (
+          normalized === "debug" ||
+          normalized === "uploads" ||
+          normalized === "masks" ||
+          normalized === "outputs" ||
+          normalized === "jobs"
+        ) {
           targets.add(normalized);
         } else {
           throw new Error(`Unknown delete target: ${part}`);
@@ -86,6 +92,7 @@ async function main(): Promise<void> {
     if (arg === "--all") {
       targets.add("debug");
       targets.add("uploads");
+      targets.add("masks");
       targets.add("outputs");
       targets.add("jobs");
       continue;
@@ -128,6 +135,7 @@ async function main(): Promise<void> {
   const exactKeys: string[] = [];
   if (targets.has("debug")) prefixes.push(`debug/${jobId}/`);
   if (targets.has("uploads")) prefixes.push(`uploads/${jobId}/`);
+  if (targets.has("masks")) prefixes.push(`masks/${jobId}/`);
   if (targets.has("outputs")) prefixes.push(`outputs/${jobId}/`);
   if (targets.has("jobs")) exactKeys.push(`jobs/${jobId}.json`);
 

@@ -34,7 +34,7 @@ Description:
 
 Notes:
   - Debug artifacts require `DEBUG_ARTIFACTS=true` in Vercel env.
-  - `--cleanup` deletes debug/uploads/jobs for this job from R2 (requires R2_* env vars locally).
+  - `--cleanup` deletes debug/uploads/masks/jobs for this job from R2 (requires R2_* env vars locally).
   - `--cleanup-all` also deletes outputs/ for this job.
 EOF
 }
@@ -118,6 +118,32 @@ fi
 
 BASE_URL="${BASE_URL%/}"
 
+echo "==> Ensuring system is ready"
+READY_URL="${BASE_URL}/api/ready"
+ready_json="$(curl --fail --silent --show-error -H "x-carcompose-passcode: ${PASSCODE}" "${READY_URL}")"
+ready_val="$(echo "$ready_json" | jq -r '.ready // false')"
+phase_val="$(echo "$ready_json" | jq -r '.phase // empty')"
+msg_val="$(echo "$ready_json" | jq -r '.message // empty')"
+echo "   [0/${MAX_POLLS}] ready=${ready_val} phase=${phase_val} msg=${msg_val}"
+if [[ "${ready_val}" != "true" ]]; then
+  for ((i=1; i<=MAX_POLLS; i++)); do
+    sleep "${POLL_SECONDS}"
+    ready_json="$(curl --fail --silent --show-error -H "x-carcompose-passcode: ${PASSCODE}" "${READY_URL}")"
+    ready_val="$(echo "$ready_json" | jq -r '.ready // false')"
+    phase_val="$(echo "$ready_json" | jq -r '.phase // empty')"
+    msg_val="$(echo "$ready_json" | jq -r '.message // empty')"
+    echo "   [${i}/${MAX_POLLS}] ready=${ready_val} phase=${phase_val} msg=${msg_val}"
+    if [[ "${ready_val}" == "true" ]]; then
+      break
+    fi
+  done
+fi
+
+if [[ "${ready_val}" != "true" ]]; then
+  echo "System not ready after ${MAX_POLLS} polls." >&2
+  exit 2
+fi
+
 echo "==> Presigning uploads"
 PRESIGN_JSON="$(curl --fail --silent --show-error \
   -X POST \
@@ -177,11 +203,13 @@ if [[ "$CLEANUP" == "true" ]]; then
     exit 0
   fi
 
-  TARGETS="debug,uploads,jobs"
+  TARGETS="debug,uploads,masks,jobs"
   if [[ "$CLEANUP_ALL" == "true" ]]; then
-    TARGETS="debug,uploads,outputs,jobs"
+    TARGETS="debug,uploads,masks,outputs,jobs"
   fi
 
   echo "==> Cleaning R2 keys for jobId=${JOB_ID} targets=${TARGETS}"
   (cd web && npx tsx scripts/r2-prune-job.ts --job-id "${JOB_ID}" --delete "${TARGETS}" --yes)
 fi
+
+echo "JOB_ID=${JOB_ID}"

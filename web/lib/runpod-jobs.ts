@@ -41,6 +41,8 @@ function getRunpodBaseUrl(endpointId: string): string {
 
 export async function submitRunpodJob(endpointId: string, input: Record<string, unknown>): Promise<string> {
   const env = getEnv();
+  const executionTimeout = env.RUNPOD_EXECUTION_TIMEOUT_S * 1000;
+  const ttl = Math.max(86_400_000, executionTimeout + 30 * 60 * 1000);
   const response = await externalFetch(`${getRunpodBaseUrl(endpointId)}/run`, {
     service: "RunPod run",
     timeoutMs: 20_000,
@@ -50,7 +52,14 @@ export async function submitRunpodJob(endpointId: string, input: Record<string, 
       "Content-Type": "application/json",
       Authorization: `Bearer ${env.RUNPOD_API_KEY}`
     },
-    body: JSON.stringify({ input })
+    body: JSON.stringify({
+      input,
+      policy: {
+        executionTimeout,
+        ttl,
+        lowPriority: false
+      }
+    })
   });
 
   const payload = (await response.json()) as { id?: string; error?: string };
