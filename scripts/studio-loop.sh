@@ -136,7 +136,7 @@ for ((i=1; i<=ITERS; i++)); do
   job_dir="$(pwd)/tmp/debug-jobs/${job_id}"
   score_json_path="${job_dir}/score.json"
 
-  if [[ $run_exit -ne 0 ]]; then
+  if [[ $run_exit -ne 0 || ! -f "${job_dir}/status.json" || ! -f "${job_dir}/output.jpg" ]]; then
     echo "{\"jobId\":\"${job_id}\",\"pass\":false,\"score\":-9999,\"metrics\":{\"runExit\":${run_exit}}}" >"${score_json_path}"
   else
     python3 scripts/score-studio-job.py --job-dir "${job_dir}" --background "${BG_PATH}" >"${score_json_path}"
