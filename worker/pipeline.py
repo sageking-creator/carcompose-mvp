@@ -46,7 +46,7 @@ from utils.image_ops import (
     reharden_resized_alpha,
     resize_rgba_premultiplied,
 )
-from utils.refine import build_hardened_alpha, refine_foreground
+from utils.refine import build_hardened_alpha, refine_foreground, sanitize_external_alpha
 
 _models: Dict[str, Any] = {}
 _DEBUG_ARTIFACT_CONTENT_TYPES: dict[str, str] = {
@@ -277,7 +277,7 @@ def place_car_on_background(
             if per_col_bottom:
                 bottoms = np.array(per_col_bottom, dtype=np.float32)
                 # Robust ground-contact estimate: ignore tiny outlier spikes beneath the car.
-                strict_bottom_local = int(np.clip(np.percentile(bottoms, 88), 0, car_h - 1))
+                strict_bottom_local = int(np.clip(np.percentile(bottoms, 94), 0, car_h - 1))
                 contact_cols = np.array(
                     [col for col, row in zip(per_col_index, per_col_bottom) if row >= strict_bottom_local - 2],
                     dtype=np.float32,
@@ -382,7 +382,7 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
             external_cutout_rgba = external_cutout_rgba.resize(car_image.size, Image.Resampling.LANCZOS)
 
         cutout_alpha = np.array(external_cutout_rgba.getchannel("A"), dtype=np.float32) / 255.0
-        alpha, _ = build_hardened_alpha(external_cutout_rgba.convert("RGB"), cutout_alpha, mode="strict")
+        alpha = sanitize_external_alpha(cutout_alpha)
         alpha_source = alpha
         car_mask = Image.fromarray(np.clip(alpha * 255.0, 0.0, 255.0).astype(np.uint8), mode="L")
 
@@ -456,7 +456,7 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
             if external_cutout_rgba is None:
                 raise InvalidInputError("car_cutout_url", "External cutout was requested but not loaded.")
             cutout_alpha = np.array(external_cutout_rgba.getchannel("A"), dtype=np.float32) / 255.0
-            alpha, _ = build_hardened_alpha(external_cutout_rgba.convert("RGB"), cutout_alpha, mode="strict")
+            alpha = sanitize_external_alpha(cutout_alpha)
             alpha_source = alpha
             car_mask = Image.fromarray(np.clip(alpha * 255.0, 0.0, 255.0).astype(np.uint8), mode="L")
             cutout_rgb_np = np.array(external_cutout_rgba.convert("RGB"), dtype=np.uint8)
@@ -721,13 +721,18 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
     studio_mode_applied = "off"
 
     if variant == "core":
+        shadow_mode = settings.contact_shadow_mode
+        shadow_strength = settings.core_contact_shadow_strength
+        if studio_background and shadow_mode == "v3":
+            shadow_mode = "v2"
+            shadow_strength = min(shadow_strength, 0.24)
         try:
             final, contact_shadow_applied, contact_shadow_mask = apply_contact_shadow(
                 image=final,
                 foreground_mask=foreground_mask,
                 foreground_bbox=placement_bbox,
-                strength=settings.core_contact_shadow_strength,
-                mode=settings.contact_shadow_mode,
+                strength=shadow_strength,
+                mode=shadow_mode,
                 return_shadow_mask=True,
             )
         except Exception as error:
@@ -884,6 +889,8 @@ def run_pipeline(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
         "edgeBandWidthPx": round(float(edge_halo_stats["edgeBandWidthPx"]), 4),
         "protectCoverageRatio": round(float(harmonization_diag.get("protectCoverageRatio", 0.0)), 4),
         "contactShadowApplied": contact_shadow_applied,
+        "contactShadowModeUsed": shadow_mode if variant == "core" else "none",
+        "contactShadowStrengthUsed": round(float(shadow_strength), 3) if variant == "core" else 0.0,
         "glassModeApplied": glass_mode_applied,
         "glassBackendApplied": glass_backend_applied,
         "studioModeApplied": studio_mode_applied,

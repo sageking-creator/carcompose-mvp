@@ -20,7 +20,7 @@ from utils.image_ops import (
     get_tight_bbox_from_mask,
     resize_rgba_premultiplied,
 )
-from utils.refine import build_hardened_alpha
+from utils.refine import build_hardened_alpha, sanitize_external_alpha
 
 
 class QualityOpsTests(unittest.TestCase):
@@ -92,6 +92,22 @@ class QualityOpsTests(unittest.TestCase):
         self.assertLessEqual(checks["nearLeakMeanAlpha"], 0.03)
         self.assertLessEqual(checks["nearLeakP95Alpha"], 0.18)
         self.assertLess(checks["maskAreaRatio"], 0.30)
+
+    def test_sanitize_external_alpha_keeps_interior_opaque_and_edge_thin(self) -> None:
+        height, width = 240, 360
+        alpha = np.zeros((height, width), dtype=np.float32)
+        alpha[60:200, 80:300] = 1.0
+        alpha[56:204, 76:304] = np.maximum(alpha[56:204, 76:304], 0.6)
+        alpha[52:208, 72:308] = np.maximum(alpha[52:208, 72:308], 0.25)
+
+        sanitized = sanitize_external_alpha(alpha)
+        mask = Image.fromarray(np.clip(sanitized * 255.0, 0.0, 255.0).astype(np.uint8), mode="L")
+        bbox = get_tight_bbox_from_mask(mask)
+        checks = compute_mask_artifact_checks(mask, bbox)
+
+        self.assertGreaterEqual(checks["interiorOpaqueRatio"], 0.99)
+        self.assertLessEqual(checks["outsideLeakMeanAlpha"], 0.01)
+        self.assertLessEqual(checks["nearLeakP95Alpha"], 0.05)
 
     def test_strict_alpha_mode_uses_solid_fallback_when_core_empty(self) -> None:
         height, width = 320, 480

@@ -485,6 +485,45 @@ def build_hardened_alpha(
     raise RuntimeError("Failed to build hardened alpha: no candidate succeeded.")
 
 
+def sanitize_external_alpha(alpha_map: np.ndarray) -> np.ndarray:
+    if alpha_map.ndim != 2:
+        raise ValueError("alpha_map must be a 2D array.")
+
+    alpha = np.clip(alpha_map.astype(np.float32), 0.0, 1.0)
+    long_edge = max(alpha.shape)
+    hard = (alpha >= 0.5).astype(np.uint8)
+    hard = _largest_connected_component(hard)
+    if hard.max() == 0:
+        raise RuntimeError("External alpha contains no foreground component.")
+
+    edge_px = int(np.clip(round(long_edge * 0.0018), 1, 4))
+    edge_kernel = _ellipse_kernel(edge_px)
+    solid = cv2.erode(hard, edge_kernel)
+    if solid.max() == 0:
+        solid = hard
+    dilated = cv2.dilate(hard, edge_kernel)
+    edge_inside = np.logical_and(dilated > 0, hard > 0)
+    edge_outside = np.logical_and(dilated > 0, hard == 0)
+
+    alpha_soft = cv2.GaussianBlur(
+        alpha,
+        (0, 0),
+        sigmaX=max(0.8, edge_px / 2.0),
+        sigmaY=max(0.8, edge_px / 2.0),
+    )
+    out = np.zeros_like(alpha, dtype=np.float32)
+    out[solid > 0] = 1.0
+    out[np.logical_and(edge_inside, solid == 0)] = 1.0
+
+    if edge_outside.any():
+        edge_vals = np.clip(alpha_soft[edge_outside], 0.0, 1.0)
+        edge_vals = np.minimum(edge_vals, 0.35)
+        edge_vals = 0.04 * np.power(edge_vals / 0.35, 2.0)
+        out[edge_outside] = np.clip(edge_vals, 0.0, 0.04)
+
+    return np.clip(out, 0.0, 1.0)
+
+
 def refine_foreground(image: Image.Image, alpha: np.ndarray) -> Image.Image:
     alpha = np.clip(alpha.astype(np.float32), 0.0, 1.0)
     alpha_u8 = (alpha * 255.0).astype(np.uint8)
